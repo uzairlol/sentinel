@@ -56,10 +56,10 @@ all = [
 sentinel = "sentinel._cli:main"
 
 [project.urls]
-Homepage = "https://github.com/uzairarif/sentinel"
-Documentation = "https://github.com/uzairarif/sentinel#readme"
-Issues = "https://github.com/uzairarif/sentinel/issues"
-Changelog = "https://github.com/uzairarif/sentinel/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/uzairlol/sentinel"
+Documentation = "https://github.com/uzairlol/sentinel#readme"
+Issues = "https://github.com/uzairlol/sentinel/issues"
+Changelog = "https://github.com/uzairlol/sentinel/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [

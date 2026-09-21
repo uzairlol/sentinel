@@ -1,7 +1,7 @@
 # Sentinel Documentation
 
 Documentation home. The canonical engineering plan is
-[`SENTINEL_TDD.md`](https://github.com/uzairarif/sentinel/blob/main/SENTINEL_TDD.md)
+[`SENTINEL_TDD.md`](https://github.com/uzairlol/sentinel/blob/main/SENTINEL_TDD.md)
 at the repository root.
 
 ## Contents

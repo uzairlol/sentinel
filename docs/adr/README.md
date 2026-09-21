@@ -3,7 +3,7 @@
 An Architecture Decision Record (ADR) captures a significant decision, why it
 was made, and what the consequences are. Follow the template below. Every
 significant decision in this project must have an ADR — see
-[`CONTRIBUTING.md`](https://github.com/uzairarif/sentinel/blob/main/CONTRIBUTING.md)
+[`CONTRIBUTING.md`](https://github.com/uzairlol/sentinel/blob/main/CONTRIBUTING.md)
 and `SENTINEL_TDD.md` §2.9.
 
 ## Format
