@@ -1,0 +1,30 @@
+# Normalize line endings. Text files use LF on checkout on all platforms.
+* text=auto eol=lf
+
+# Shell scripts and PowerShell files: LF
+*.sh text eol=lf
+*.ps1 text eol=lf
+
+# Binary formats must never be touched
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff2 binary
+*.sqlite binary
+*.sqlite3 binary
+
+# Documentation
+*.md text eol=lf diff=markdown
+*.tex text eol=lf
+*.rst text eol=lf
+
+# Lockfiles and generated artifacts: always diff as text where possible
+uv.lock text eol=lf
+*.ini text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf

@@ -1,0 +1,40 @@
+name: Gate failure
+description: A sprint exit gate failed — record it so progression stops and the root cause is fixed. See SENTINEL_TDD.md §2.11 / §3.3.
+title: "[gate-failure] "
+labels: [gate-failure]
+body:
+  - type: input
+    id: sprint
+    attributes:
+      label: Sprint
+      description: The sprint whose gate failed.
+      placeholder: "S5"
+    validations:
+      required: true
+  - type: input
+    id: task
+    attributes:
+      label: Blocking task ID
+      description: The task that failed its exit criterion.
+      placeholder: "S5-T13"
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed vs required
+      description: What was required by the exit criteria, and what actually happened?
+    validations:
+      required: true
+  - type: dropdown
+    id: decision
+    attributes:
+      label: Resolution decision
+      options:
+        - Fix (planned)
+        - Rescope (with ADR)
+        - Descope (recorded in ADR)
+      description: See SENTINEL_TDD.md §2.11. Confirmed by the maintainer.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Evidence, reproduction, discussion link.

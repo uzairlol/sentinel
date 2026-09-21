@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a feature or improvement for sentinel-sdk
+title: "[feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that Sentinel cannot currently do?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Sketch of what the feature would look like.
+  - type: textarea
+    id: roadmap
+    attributes:
+      label: Roadmap mapping
+      description: Which sprint (if any) in SENTINEL_TDD.md does this belong to? Note if it is post-GA scope.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds or other approaches you have tried.

@@ -1,0 +1,27 @@
+site_name: Sentinel SDK
+docs_dir: docs
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: false
+nav:
+  - Home: index.md
+  - ADRs: adr/README.md
+watch:
+  - src/sentinel

@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.trial/
+*.log
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+id_rsa*
+secrets/
+
+# Sentinel runtime artifacts (self-hosted event store, local data)
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.duckdb
+sentinel_data/
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS
+desktop.ini
+
+# ES / build tooling
+node_modules/
+
+# Tooling
+.hmtv/

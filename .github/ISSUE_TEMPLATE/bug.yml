@@ -1,0 +1,68 @@
+name: Bug report
+description: Report a reproducible bug in sentinel-sdk
+title: "[bug] "
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect to happen?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Sentinel version
+      placeholder: "0.0.1 or commit hash"
+  - type: dropdown
+    id: framework
+    attributes:
+      label: Agent framework
+      options:
+        - LangChain
+        - LangGraph
+        - Raw HTTP (Ollama / OpenAI-compatible)
+        - Custom / generic decorator
+        - None (CLI / store only)
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Minimal script or steps. Redact any secrets.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Logs / tracebacks, redacted.
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - P2 (low)
+        - P1 (high)
+        - P0 (blocking)
+    validations:
+      required: true
+  - type: checkboxes
+    id: area
+    attributes:
+      label: Affected area
+      description: Which part of the system is affected? Multiple allowed.
+      options:
+        - label: Capture / instrumentation
+        - label: Event store
+        - label: Evaluator module
+        - label: Gating / policy
+        - label: Review API / UI
+        - label: CLI
+        - label: Packaging / deployment
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Related task/PR/issue, environment details, anything else useful.
