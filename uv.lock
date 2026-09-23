@@ -2122,6 +2122,15 @@ wheels = [
 ]
 
 [[package]]
+name = "python-ulid"
+version = "4.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d6/41/65079023c81491a21799c0120bce5925366b6913596bf797806f19973290/python_ulid-4.0.1.tar.gz", hash = "sha256:bbeec02556190bb9dc3401faa7268696acbfbe7b6db9908c155dc3548629f20c", size = 101683, upload-time = "2026-07-20T15:21:41.256Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b4/15/8b39b36f55b6618ec4ca9b55134dcfd9c04cecbc72709f5d8e6bdebed9cd/python_ulid-4.0.1-py3-none-any.whl", hash = "sha256:6f1d69ceb97e99fe542df8476ebcd7a668284bf53ee14b3106bcc6a341a95ed9", size = 14609, upload-time = "2026-07-20T15:21:40.214Z" },
+]
+
+[[package]]
 name = "pyyaml"
 version = "6.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2207,6 +2216,18 @@ wheels = [
 ]
 
 [[package]]
+name = "respx"
+version = "0.23.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/43/98/4e55c9c486404ec12373708d015ebce157966965a5ebe7f28ff2c784d41b/respx-0.23.1.tar.gz", hash = "sha256:242dcc6ce6b5b9bf621f5870c82a63997e8e82bc7c947f9ffe272b8f3dd5a780", size = 29243, upload-time = "2026-04-08T14:37:16.008Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1d/4a/221da6ca167db45693d8d26c7dc79ccfc978a440251bf6721c9aaf251ac0/respx-0.23.1-py2.py3-none-any.whl", hash = "sha256:b18004b029935384bccfa6d7d9d74b4ec9af73a081cc28600fffc0447f4b8c1a", size = 25557, upload-time = "2026-04-08T14:37:14.613Z" },
+]
+
+[[package]]
 name = "rich"
 version = "14.3.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2246,11 +2267,14 @@ wheels = [
 
 [[package]]
 name = "sentinel-sdk"
-version = "0.0.1"
+version = "0.0.2"
 source = { editable = "." }
 dependencies = [
+    { name = "aiosqlite" },
+    { name = "httpx" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "python-ulid" },
     { name = "structlog" },
 ]
 
@@ -2303,6 +2327,7 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "python-semantic-release" },
+    { name = "respx" },
     { name = "ruff" },
 ]
 docs = [
@@ -2312,16 +2337,19 @@ docs = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiosqlite", specifier = ">=0.20" },
     { name = "aiosqlite", marker = "extra == 'sqlite'", specifier = ">=0.20" },
     { name = "alembic", marker = "extra == 'postgres'", specifier = ">=1.13" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.29" },
     { name = "fastapi", marker = "extra == 'api'", specifier = ">=0.111" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'http'", specifier = ">=0.27" },
     { name = "langchain-core", marker = "extra == 'langchain'", specifier = ">=0.2" },
     { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=0.1" },
     { name = "numpy", marker = "extra == 'embeddings'", specifier = ">=1.26" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pydantic-settings", specifier = ">=2.3" },
+    { name = "python-ulid", specifier = ">=2.7" },
     { name = "sentinel-sdk", extras = ["postgres", "sqlite", "http", "api", "langchain", "langgraph", "embeddings"], marker = "extra == 'all'" },
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'postgres'", specifier = ">=2.0" },
     { name = "structlog", specifier = ">=24.1" },
@@ -2340,6 +2368,7 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.23" },
     { name = "pytest-cov", specifier = ">=5.0" },
     { name = "python-semantic-release", specifier = ">=9.8" },
+    { name = "respx", specifier = ">=0.21" },
     { name = "ruff", specifier = ">=0.5" },
 ]
 docs = [
