@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
+from sentinel.capture.writer import BatchedWriter
 from sentinel.models.events import (
     SESSION_END,
     SESSION_START,
@@ -31,9 +32,10 @@ class SessionClosedError(RuntimeError):
 class SessionContext:
     """One capture session: owns a ``session_id`` and a monotonic ``seq``."""
 
-    def __init__(self, store: EventStore) -> None:
-        """Open an unbounded capture session against *store*."""
+    def __init__(self, store: EventStore, writer: BatchedWriter | None = None) -> None:
+        """Open an unbounded capture session against *store* or *writer*."""
         self._store = store
+        self._writer = writer
         self._seq = -1
         self._closed = False
         self.session_id = new_event_id()
@@ -52,7 +54,10 @@ class SessionContext:
             payload=dict(payload),
             refs=refs,
         )
-        await self._store.append(event)
+        if self._writer is not None:
+            await self._writer.submit(event)
+        else:
+            await self._store.append(event)
         self._seq = event.seq
         return event
 
@@ -88,18 +93,23 @@ class SessionContext:
 
 
 @asynccontextmanager
-async def session(store: EventStore) -> AsyncIterator[SessionContext]:
-    """Open a capture session for *store*.
+async def session(
+    store: EventStore, writer: BatchedWriter | None = None
+) -> AsyncIterator[SessionContext]:
+    """Open a capture session against *store* (or the *writer* pipeline).
 
     Records ``session.start`` on entry and ``session.end`` on exit, even when
     the inner body raises, so a session is always bracketed by its bookends.
+    When a :class:`~sentinel.capture.writer.BatchedWriter` is supplied, events
+    are routed through the async, fail-open pipeline and flushed on exit;
+    otherwise they are appended directly to *store*.
 
     Example::
 
         async with session(store) as ctx:
             await ctx.capture(type="llm.request", payload={...})
     """
-    ctx = SessionContext(store)
+    ctx = SessionContext(store, writer=writer)
     started = False
     try:
         await ctx.start()
@@ -108,3 +118,5 @@ async def session(store: EventStore) -> AsyncIterator[SessionContext]:
     finally:
         if started:
             await ctx.end()
+        if writer is not None:
+            await writer.flush()
