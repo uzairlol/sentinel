@@ -159,6 +159,13 @@ disallow_untyped_defs = true
 no_implicit_optional = true
 check_untyped_defs = true
 
+[[tool.mypy.overrides]]
+# asyncpg lives behind the optional "postgres" extra; the adapter is
+# type-checked for real when the extra is installed (Postgres CI job),
+# and checked permissively in the offline dev environment.
+module = "asyncpg"
+ignore_missing_imports = true
+
 # ---------------------------------------------------------------------------
 # pytest
 # ---------------------------------------------------------------------------
@@ -187,6 +194,9 @@ markers = [
 [tool.coverage.run]
 source = ["src/sentinel"]
 branch = true
+# The Postgres memory adapter (S1-T11) is exercised by the Postgres
+# integration job in CI, not by the offline unit gate.
+omit = ["src/sentinel/memory/postgres.py"]
 
 [tool.coverage.report]
 show_missing = true

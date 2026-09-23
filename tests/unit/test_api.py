@@ -68,6 +68,12 @@ def test_instrument_public_names_are_stable() -> None:
     # S1-T10 additions: the generic trace decorator for custom functions/tools.
     assert {"trace"} <= set(sentinel.instrument.__all__)
     assert callable(sentinel.instrument.trace)
+    # S1-T11 additions: the memory read/write capture surface.
+    assert {"MemoryInstrumentor"} <= set(sentinel.instrument.__all__)
+    memory = importlib.import_module("sentinel.memory")
+    assert callable(memory.InMemoryMemoryStore)
+    assert callable(memory.MemoryStore)
+    assert callable(memory.PostgresMemoryStore)
 
 
 def test_internal_modules_are_not_part_of_the_contract() -> None:

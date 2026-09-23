@@ -59,6 +59,33 @@ jobs:
           name: coverage-py${{ matrix.python }}
           path: coverage.xml
 
+  integration-postgres:
+    name: Integration (Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel
+          POSTGRES_DB: sentinel_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sentinel"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --group dev --extra postgres
+      - name: Run Postgres adapter integration tests
+        run: uv run pytest tests/integration/test_memory_postgres.py -q --no-cov
+        env:
+          SENTINEL_TEST_POSTGRES_DSN: postgresql://sentinel:sentinel@localhost:5432/sentinel_test
+
   security:
     name: Security scan
     runs-on: ubuntu-latest
