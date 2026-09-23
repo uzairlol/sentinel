@@ -14,7 +14,7 @@ green CI plus a checked-off Definition of Done (see below).
 
 ## Before you start
 
-1. Find your place in the roadmap: [`SENTINEL_TDD.md`](SENTINEL_TDD.md).
+1. Find your place in the roadmap: [`SENTINEL_TDD.md`](docs/design/SENTINEL_TDD.md).
    Only implement work belonging to the current or an older sprint. If your
    change isn't mapped to a task ID, open an issue first.
 2. Check for an open ADR-able decision. If your change contains a significant

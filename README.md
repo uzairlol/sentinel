@@ -19,14 +19,14 @@ checkpoint until a human approves, rejects, or requests revision.
 
 ## Status
 
-**Pre-alpha (maturity `-1 → 0`).** Sprint `S-1` (foundations) is scaffolded
-locally; its gate concludes on first remote CI run, then `S0` (vertical slice) is
-next. See the master plan in [`SENTINEL_TDD.md`](SENTINEL_TDD.md) for the full
+**Pre-alpha (maturity `0`).** Sprint `S-1` (foundations) gate is green on `main`;
+`S0` (vertical slice) is in progress. See the master plan in
+[`SENTINEL_TDD.md`](docs/design/SENTINEL_TDD.md) for the full
 `-1 → 101` roadmap, per-sprint work packages, and exit gates.
 
 ## Design documents
 
-- [`SENTINEL_TDD.md`](SENTINEL_TDD.md) — master technical design document and development roadmap
+- [`SENTINEL_TDD.md`](docs/design/SENTINEL_TDD.md) — master technical design document and development roadmap
 - [`docs/design/safety_sdk.tex`](docs/design/safety_sdk.tex) — original conceptual design (LaTeX)
 - [`docs/design/safety_sdk.pdf`](docs/design/safety_sdk.pdf) — compiled version of the original design
 
@@ -57,7 +57,7 @@ uv run sentinel --version    # smoke-test the CLI
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). Every change flows through a PR with
-the tasks in [`SENTINEL_TDD.md`](SENTINEL_TDD.md); commits use Conventional
+the tasks in [`SENTINEL_TDD.md`](docs/design/SENTINEL_TDD.md); commits use Conventional
 Commits (`feat(scope): ...`, `fix(scope): ...`).
 
 ## Security

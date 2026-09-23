@@ -287,8 +287,8 @@ See [`§2.11`](#211-gate-failure-protocol). Restated for emphasis: **a failed ga
 
 | Sprint | Maturity | Status | Gate result | Notes / blockers |
 |---|---|---|---|---|
-| `S-1` | `-1 → 0` | `[~]` | — | Scaffolding done locally; gate pending remote push + first CI run |
-| `S0` | `0 → 5` | `[ ]` | — | — |
+| `S-1` | `-1 → 0` | `[x]` | Passed | Gate green on `main` (lint, typecheck, test 3.12/3.13, security, build, docs). Branch protection enabled, `v0.0.1` GPG-signed tag. |
+| `S0` | `0 → 5` | `[~]` | — | In progress |
 | `S1` | `5 → 15` | `[ ]` | — | — |
 | `S2` | `15 → 25` | `[ ]` | — | — |
 | `S3` | `25 → 35` | `[ ]` | — | — |
@@ -1860,10 +1860,10 @@ sentinel/
 ├─ examples/
 ├─ docs/
 │  ├─ adr/  modules/  operations/  security/  runbooks/
-├─ deploy/                        # docker compose, future helm
+│  └─ design/SENTINEL_TDD.md       # this document
+├─ deploy/                         # docker compose, future helm
 ├─ pyproject.toml
 ├─ uv.lock
-├─ SENTINEL_TDD.md                # this document
 └─ README.md
 ```
 
@@ -1871,6 +1871,7 @@ sentinel/
 
 | Version | Date | Change |
 |---|---|---|
+| v1.2 | 2026-09-23 | Sprint `S-1` gate passed: CI green on `main`, branch protection enabled, `v0.0.1` GPG-signed tag pushed. Sprint `S0` (vertical slice) in progress. |
 | v1.1 | 2026-09-21 | Sprint `S-1` scaffolding executed: repo tree, governance files, pyproject/uv, tooling, CI, ADR 0001–0010. |
 | v1.0 | 2026-09-21 | Initial master engineering plan derived from `safety_sdk.tex`; 15-sprint roadmap `-1 → 101`, global standards, risk register, DoD@101. |
 

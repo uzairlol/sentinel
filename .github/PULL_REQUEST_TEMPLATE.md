@@ -4,7 +4,7 @@
 
 ## Linked work
 
-- Task: `S1-T1` (see [SENTINEL_TDD.md](../../SENTINEL_TDD.md))
+- Task: `S1-T1` (see [SENTINEL_TDD.md](../../docs/design/SENTINEL_TDD.md))
 - Closes #<!-- issue number -->
 
 ## What changed
