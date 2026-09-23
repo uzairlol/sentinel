@@ -32,7 +32,9 @@ def test_top_level_public_names_are_stable() -> None:
         "new_event_id",
         "session",
     }
-    assert set(sentinel.__all__) == expected
+    # A frozen *subset*: every pinned name stays importable forever; new names
+    # may be added as S1 submodules ship.
+    assert expected <= set(sentinel.__all__)
 
 
 def test_instrument_public_names_are_stable() -> None:
@@ -48,7 +50,13 @@ def test_instrument_public_names_are_stable() -> None:
         "instrument_ollama_call",
         "session",
     }
-    assert set(sentinel.instrument.__all__) == expected
+    assert expected <= set(sentinel.instrument.__all__)
+    # S1-T9 additions: the openai_compat transport surface.
+    assert {
+        "TransportCallError",
+        "chat_completion",
+        "chat_completion_stream",
+    } <= set(sentinel.instrument.__all__)
 
 
 def test_internal_modules_are_not_part_of_the_contract() -> None:

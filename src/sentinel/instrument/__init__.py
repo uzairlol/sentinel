@@ -20,6 +20,11 @@ from sentinel.instrument.ollama import (
     OllamaChatError,
     instrument_ollama_call,
 )
+from sentinel.instrument.openai_compat import (
+    TransportCallError,
+    chat_completion,
+    chat_completion_stream,
+)
 from sentinel.instrument.registry import (
     BaseInstrumentor,
     Instrumentor,
@@ -41,6 +46,9 @@ __all__ = [
     "OllamaChatError",
     "SessionClosedError",
     "SessionContext",
+    "TransportCallError",
+    "chat_completion",
+    "chat_completion_stream",
     "instrument_ollama_call",
     "session",
 ]
