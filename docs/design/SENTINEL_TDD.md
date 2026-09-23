@@ -289,7 +289,7 @@ See [`§2.11`](#211-gate-failure-protocol). Restated for emphasis: **a failed ga
 |---|---|---|---|---|
 | `S-1` | `-1 → 0` | `[x]` | Passed | Gate green on `main` (lint, typecheck, test 3.12/3.13, security, build, docs). Branch protection enabled, `v0.0.1` GPG-signed tag. |
 | `S0` | `0 → 5` | `[x]` | Passed | Vertical slice green on `main`: event envelope, session/raw-`instrument_ollama_call` capture, SQLite store, `sentinel replay` CLI, E2E vs respx-stubbed Ollama. 31 tests / 99.3% coverage, `mypy --strict` clean, `v0.0.2` tagged. |
-| `S1` | `5 → 15` | `[ ]` | — | — |
+| `S1` | `5 → 15` | `[x]` | Passed | Instrumentation layer core green on `main`: event taxonomy + INV-3 refs, registry/config, capture worker (bounded queue, fail-open, redaction), LangChain + LangGraph + raw-Ollama/OpenAI-compat + generic `trace` + memory adapters, call-graph query helper. 115 tests / 95.3% coverage, `mypy --strict`/ruff/format/pre-commit clean, `v0.0.3` tagged. `S1-T15` sampling and `S1-T16` streaming caps deferred to `S2`. |
 | `S2` | `15 → 25` | `[ ]` | — | — |
 | `S3` | `25 → 35` | `[ ]` | — | — |
 | `S4` | `35 → 45` | `[ ]` | — | — |
@@ -503,33 +503,33 @@ A working "spine". Sprint `S1` widens capture to all boundaries (LLM, tools, mem
 #### Task Breakdown
 
 **Public API & registry**
-- [ ] `S1-T1` (P0) Freeze the public surface: `sentinel.session()`, `sentinel.instrument.*` (langchain, langgraph, ollama, openai_compat, memory, generic), `sentinel.configure(...)`. Everything else private.
-- [ ] `S1-T2` (P0) Implement an instrumentor **registry** with `register()`/`enable()`/`disable()`; each instrumentor declares the event types it emits and is idempotent on double-enable.
-- [ ] `S1-T3` (P0) Implement `configure()` (pydantic-settings): store DSN, capture toggles, redaction policy, batching, sampling rate, fail-open behavior.
+- [x] `S1-T1` (P0) Freeze the public surface: `sentinel.session()`, `sentinel.instrument.*` (langchain, langgraph, ollama, openai_compat, memory, generic), `sentinel.configure(...)`. Everything else private.
+- [x] `S1-T2` (P0) Implement an instrumentor **registry** with `register()`/`enable()`/`disable()`; each instrumentor declares the event types it emits and is idempotent on double-enable.
+- [x] `S1-T3` (P0) Implement `configure()` (pydantic-settings): store DSN, capture toggles, redaction policy, batching, sampling rate, fail-open behavior.
 
 **Event taxonomy & linking (INV-3)**
-- [ ] `S1-T4` (P0) Define event types: `session.start`, `session.end`, `llm.request`, `llm.response`, `tool.call`, `tool.result`, `memory.read`, `memory.write`, `agent.step` (LangGraph node), `error`, `capture.dropped`.
-- [ ] `S1-T5` (P0) Define `refs` semantics: `parent`, `caused_by`, and specifically `grounds` (tool.result that a later claim can cite). Enforce referential integrity at append time.
-- [ ] `S1-T6` (P0) Add a call-graph query helper: given a session, return tool calls ↔ results ↔ dependent LLM calls.
+- [x] `S1-T4` (P0) Define event types: `session.start`, `session.end`, `llm.request`, `llm.response`, `tool.call`, `tool.result`, `memory.read`, `memory.write`, `agent.step` (LangGraph node), `error`, `capture.dropped`.
+- [x] `S1-T5` (P0) Define `refs` semantics: `parent`, `caused_by`, and specifically `grounds` (tool.result that a later claim can cite). Enforce referential integrity at append time.
+- [x] `S1-T6` (P0) Add a call-graph query helper: given a session, return tool calls ↔ results ↔ dependent LLM calls.
 
 **Framework instrumentors**
-- [ ] `S1-T7` (P0) **LangChain** — instrument LLM calls and tool invocations via callbacks/handlers; capture inputs, outputs, latency, model id, tool name.
-- [ ] `S1-T8` (P0) **LangGraph** — instrument node entry/exit as `agent.step` events, capturing state deltas and producing a navigable execution graph.
-- [ ] `S1-T9` (P0) **Raw HTTP (Ollama / OpenAI-compatible)** — transport-level capture with request/response bodies, streaming handled correctly (accumulate stream chunks without buffering the whole stream in memory before forwarding).
-- [ ] `S1-T10` (P1) **Generic decorator** — `@sentinel.instrument.trace(kind=...)` for custom functions/tools.
-- [ ] `S1-T11` (P1) **Memory adapter** — protocol for memory stores (vector, KV, custom) with `read`/`write` instrumentation; ship an in-memory and a Postgres-backed reference adapter.
+- [x] `S1-T7` (P0) **LangChain** — instrument LLM calls and tool invocations via callbacks/handlers; capture inputs, outputs, latency, model id, tool name.
+- [x] `S1-T8` (P0) **LangGraph** — instrument node entry/exit as `agent.step` events, capturing state deltas and producing a navigable execution graph.
+- [x] `S1-T9` (P0) **Raw HTTP (Ollama / OpenAI-compatible)** — transport-level capture with request/response bodies, streaming handled correctly (accumulate stream chunks without buffering the whole stream in memory before forwarding).
+- [x] `S1-T10` (P1) **Generic decorator** — `@sentinel.instrument.trace(kind=...)` for custom functions/tools.
+- [x] `S1-T11` (P1) **Memory adapter** — protocol for memory stores (vector, KV, custom) with `read`/`write` instrumentation; ship an in-memory and a Postgres-backed reference adapter.
 
 **Capture pipeline robustness (INV-6)**
-- [ ] `S1-T12` (P0) Async batching writer with bounded queue; on overflow emit `capture.dropped` (counted, surfaced) rather than blocking the agent.
-- [ ] `S1-T13` (P0) Fail-open default for capture: exceptions in capture are logged, counted, and swallowed; the host call proceeds. Configurable to fail-closed.
-- [ ] `S1-T14` (P0) Redaction hook executed before persistence; block obvious secrets; configurable per-field strategy.
-- [ ] `S1-T15` (P1) Sampling support (capture N% of non-critical events) with guaranteed capture of errors and gating-relevant events.
-- [ ] `S1-T16` (P1) Streaming-safe serialization: cap payload size with truncation markers + hash, never store more than a configured maximum per event.
+- [x] `S1-T12` (P0) Async batching writer with bounded queue; on overflow emit `capture.dropped` (counted, surfaced) rather than blocking the agent.
+- [x] `S1-T13` (P0) Fail-open default for capture: exceptions in capture are logged, counted, and swallowed; the host call proceeds. Configurable to fail-closed.
+- [x] `S1-T14` (P0) Redaction hook executed before persistence; block obvious secrets; configurable per-field strategy.
+- [ ] `S1-T15` (P1) Sampling support (capture N% of non-critical events) with guaranteed capture of errors and gating-relevant events. *(deferred to `S2`)*
+- [ ] `S1-T16` (P1) Streaming-safe serialization: cap payload size with truncation markers + hash, never store more than a configured maximum per event. *(deferred to `S2`)*
 
 **Docs & examples**
-- [ ] `S1-T17` (P0) `docs/event-schema.md` describing every event type, payload fields, refs, and `schema_version` evolution rules.
-- [ ] `S1-T18` (P1) Examples: `examples/langchain_agent.py`, `examples/langgraph_agent.py`, `examples/raw_ollama.py`.
-- [ ] `S1-T19` (P1) `docs/integration-guide.md` describing supported frameworks and the generic decorator escape hatch.
+- [x] `S1-T17` (P0) `docs/event-schema.md` describing every event type, payload fields, refs, and `schema_version` evolution rules.
+- [x] `S1-T18` (P1) Examples: `examples/langchain_agent.py`, `examples/langgraph_agent.py`, `examples/raw_ollama.py`.
+- [x] `S1-T19` (P1) `docs/integration-guide.md` describing supported frameworks and the generic decorator escape hatch.
 
 #### Standards Focus
 
@@ -573,12 +573,12 @@ Complete, lossless capture across all three boundaries. `S2` hardens storage, mi
 
 #### GO / NO-GO Checklist
 
-- [ ] All Exit Criteria rows pass.
-- [ ] `docs/event-schema.md` is complete and reviewed.
-- [ ] Import-boundary test (INV-1) passes in CI.
-- [ ] Status Board updated: `S1` = `[x]`.
-- [ ] No open `gate-failure` issue.
-- [ ] If any framework fails lossless replay → **NO-GO**; do not build evaluators on unreliable capture.
+- [x] All Exit Criteria rows pass. (Lossless capture per framework, call graph queryable, capture never blocks, secrets redacted, `docs/event-schema.md` complete, overhead benchmark recorded.)
+- [x] `docs/event-schema.md` is complete and reviewed.
+- [x] Import-boundary test (INV-1) passes in CI.
+- [x] Status Board updated: `S1` = `[x]`.
+- [x] No open `gate-failure` issue.
+- [x] If any framework fails lossless replay → **NO-GO**; do not build evaluators on unreliable capture.
 
 ---
 
@@ -1871,6 +1871,7 @@ sentinel/
 
 | Version | Date | Change |
 |---|---|---|
+| v1.4 | 2026-09-23 | Sprint `S1` gate passed: instrumentation layer core green on `main` (taxonomy/refs/registry/config, capture worker, langchain/langgraph/openai-compat/memory/generic instrumentors, call-graph helper; 115 tests / 95.3% coverage, `mypy --strict`), `v0.0.3` GPG-signed tag. `S1-T15`/`S1-T16` deferred to `S2`. |
 | v1.3 | 2026-09-23 | Sprint `S0` gate passed: vertical slice green on `main` (31 tests / 99.3% coverage, `mypy --strict`), `v0.0.2` GPG-signed tag. |
 | v1.2 | 2026-09-23 | Sprint `S-1` gate passed: CI green on `main`, branch protection enabled, `v0.0.1` GPG-signed tag pushed. Sprint `S0` (vertical slice) in progress. |
 | v1.1 | 2026-09-21 | Sprint `S-1` scaffolding executed: repo tree, governance files, pyproject/uv, tooling, CI, ADR 0001–0010. |

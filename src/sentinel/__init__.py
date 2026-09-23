@@ -31,7 +31,7 @@ from sentinel.models.events import Event, new_event_id
 from sentinel.query import CallGraph, Edge, get_call_graph
 from sentinel.store.sqlite import SQLiteEventStore
 
-__version__ = "0.0.2"
+__version__ = "0.0.3"
 
 __all__ = [
     "DEFAULT_BASE_URL",
