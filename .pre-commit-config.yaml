@@ -33,4 +33,5 @@ repos:
           - "pytest>=8.2"
           - "python-ulid>=2.7"
           - "respx>=0.21"
+          - "structlog>=24.1"
         pass_filenames: false
