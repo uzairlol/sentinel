@@ -19,8 +19,8 @@ checkpoint until a human approves, rejects, or requests revision.
 
 ## Status
 
-**Pre-alpha (maturity `0`).** Sprint `S-1` (foundations) gate is green on `main`;
-`S0` (vertical slice) is in progress. See the master plan in
+**Pre-alpha (maturity `0`).** Sprint `S0` (vertical slice) gate is green on `main`;
+`S1` (instrumentation layer core) is next. See the master plan in
 [`SENTINEL_TDD.md`](docs/design/SENTINEL_TDD.md) for the full
 `-1 → 101` roadmap, per-sprint work packages, and exit gates.
 

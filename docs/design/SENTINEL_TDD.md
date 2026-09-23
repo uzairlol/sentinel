@@ -288,7 +288,7 @@ See [`§2.11`](#211-gate-failure-protocol). Restated for emphasis: **a failed ga
 | Sprint | Maturity | Status | Gate result | Notes / blockers |
 |---|---|---|---|---|
 | `S-1` | `-1 → 0` | `[x]` | Passed | Gate green on `main` (lint, typecheck, test 3.12/3.13, security, build, docs). Branch protection enabled, `v0.0.1` GPG-signed tag. |
-| `S0` | `0 → 5` | `[~]` | — | In progress |
+| `S0` | `0 → 5` | `[x]` | Passed | Vertical slice green on `main`: event envelope, session/raw-`instrument_ollama_call` capture, SQLite store, `sentinel replay` CLI, E2E vs respx-stubbed Ollama. 31 tests / 99.3% coverage, `mypy --strict` clean, `v0.0.2` tagged. |
 | `S1` | `5 → 15` | `[ ]` | — | — |
 | `S2` | `15 → 25` | `[ ]` | — | — |
 | `S3` | `25 → 35` | `[ ]` | — | — |
@@ -477,11 +477,11 @@ A working "spine". Sprint `S1` widens capture to all boundaries (LLM, tools, mem
 
 #### GO / NO-GO Checklist
 
-- [ ] All Exit Criteria rows pass.
-- [ ] The event envelope is frozen enough to build on (or an ADR records why it changed).
-- [ ] Status Board updated: `S0` = `[x]`.
-- [ ] No open `gate-failure` issue.
-- [ ] If capture is not lossless for the trivial case → **NO-GO**; fixing it is a prerequisite for `S1`.
+- [x] All Exit Criteria rows pass. (E2E lossless replay; public API typed via `mypy --strict`; INV-1 enforced by import-boundary test; example added; CI green, version `0.0.2`.)
+- [x] The event envelope is frozen enough to build on (or an ADR records why it changed).
+- [x] Status Board updated: `S0` = `[x]`.
+- [x] No open `gate-failure` issue.
+- [x] If capture is not lossless for the trivial case → **NO-GO**; fixing it is a prerequisite for `S1`.
 
 ---
 
@@ -1871,6 +1871,7 @@ sentinel/
 
 | Version | Date | Change |
 |---|---|---|
+| v1.3 | 2026-09-23 | Sprint `S0` gate passed: vertical slice green on `main` (31 tests / 99.3% coverage, `mypy --strict`), `v0.0.2` GPG-signed tag. |
 | v1.2 | 2026-09-23 | Sprint `S-1` gate passed: CI green on `main`, branch protection enabled, `v0.0.1` GPG-signed tag pushed. Sprint `S0` (vertical slice) in progress. |
 | v1.1 | 2026-09-21 | Sprint `S-1` scaffolding executed: repo tree, governance files, pyproject/uv, tooling, CI, ADR 0001–0010. |
 | v1.0 | 2026-09-21 | Initial master engineering plan derived from `safety_sdk.tex`; 15-sprint roadmap `-1 → 101`, global standards, risk register, DoD@101. |
