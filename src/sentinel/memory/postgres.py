@@ -74,7 +74,7 @@ class PostgresMemoryStore:
                 value,
                 summary,
             )
-        return MemoryEntry(key=key, value=value, summary=summary, event_id=event_id)
+        return MemoryEntry(key=key, value=value, summary=summary, event_id=entry_id)
 
     async def read(self, *, query: str, limit: int = 8) -> list[MemoryEntry]:
         """Return entries whose ``key`` equals *query*, newest first."""

@@ -75,7 +75,7 @@ class SQLiteEventStore(EventStore):
             if event.refs:
                 placeholders = ",".join("?" for _ in event.refs)
                 cursor = await conn.execute(
-                    "SELECT event_id FROM events "  # noqa: S608 -- placeholders are literal "?" tokens, never user input
+                    "SELECT event_id FROM events "  # noqa: S608  # nosec B608 -- placeholders are literal "?" tokens, never user input
                     f"WHERE session_id = ? AND event_id IN ({placeholders})",
                     [event.session_id, *(link.event_id for link in event.refs)],
                 )
