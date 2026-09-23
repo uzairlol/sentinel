@@ -20,6 +20,7 @@ from sentinel.instrument.langchain import (
     LangChainInstrumentor,
     LangChainUnavailableError,
 )
+from sentinel.instrument.langgraph import LangGraphInstrumentor
 from sentinel.instrument.ollama import (
     DEFAULT_BASE_URL,
     OllamaChatError,
@@ -51,6 +52,7 @@ __all__ = [
     "InstrumentorRegistry",
     "LangChainInstrumentor",
     "LangChainUnavailableError",
+    "LangGraphInstrumentor",
     "OllamaChatError",
     "SessionClosedError",
     "SessionContext",

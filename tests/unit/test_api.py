@@ -63,6 +63,8 @@ def test_instrument_public_names_are_stable() -> None:
         "LangChainUnavailableError",
         "MAX_CAPTURED_TEXT",
     } <= set(sentinel.instrument.__all__)
+    # S1-T8 additions: the LangGraph capture surface.
+    assert {"LangGraphInstrumentor"} <= set(sentinel.instrument.__all__)
 
 
 def test_internal_modules_are_not_part_of_the_contract() -> None:
