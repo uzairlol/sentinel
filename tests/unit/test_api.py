@@ -57,6 +57,12 @@ def test_instrument_public_names_are_stable() -> None:
         "chat_completion",
         "chat_completion_stream",
     } <= set(sentinel.instrument.__all__)
+    # S1-T7 additions: the LangChain capture surface.
+    assert {
+        "LangChainInstrumentor",
+        "LangChainUnavailableError",
+        "MAX_CAPTURED_TEXT",
+    } <= set(sentinel.instrument.__all__)
 
 
 def test_internal_modules_are_not_part_of_the_contract() -> None:

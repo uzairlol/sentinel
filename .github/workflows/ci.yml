@@ -22,7 +22,7 @@ jobs:
       - uses: astral-sh/setup-uv@v3
         with:
           python-version: "3.12"
-      - run: uv sync --group dev
+      - run: uv sync --group dev --extra langchain --extra langgraph
       - name: ruff lint
         run: uv run ruff check .
       - name: ruff format
@@ -36,7 +36,7 @@ jobs:
       - uses: astral-sh/setup-uv@v3
         with:
           python-version: "3.12"
-      - run: uv sync --group dev
+      - run: uv sync --group dev --extra langchain --extra langgraph
       - run: uv run mypy
 
   test:
@@ -51,7 +51,7 @@ jobs:
       - uses: astral-sh/setup-uv@v3
         with:
           python-version: ${{ matrix.python }}
-      - run: uv sync --group dev
+      - run: uv sync --group dev --extra langchain --extra langgraph
       - run: uv run pytest
       - name: Upload coverage
         uses: actions/upload-artifact@v4

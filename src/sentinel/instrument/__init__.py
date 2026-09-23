@@ -15,6 +15,11 @@ Per INV-1 this package only captures; it contains no analysis or evaluation.
 
 from __future__ import annotations
 
+from sentinel.instrument.langchain import (
+    MAX_CAPTURED_TEXT,
+    LangChainInstrumentor,
+    LangChainUnavailableError,
+)
 from sentinel.instrument.ollama import (
     DEFAULT_BASE_URL,
     OllamaChatError,
@@ -39,10 +44,13 @@ from sentinel.instrument.session import (
 
 __all__ = [
     "DEFAULT_BASE_URL",
+    "MAX_CAPTURED_TEXT",
     "BaseInstrumentor",
     "Instrumentor",
     "InstrumentorNotFoundError",
     "InstrumentorRegistry",
+    "LangChainInstrumentor",
+    "LangChainUnavailableError",
     "OllamaChatError",
     "SessionClosedError",
     "SessionContext",
