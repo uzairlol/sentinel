@@ -28,6 +28,7 @@ from sentinel.instrument.registry import (
 )
 from sentinel.instrument.session import SessionClosedError, SessionContext, session
 from sentinel.models.events import Event, new_event_id
+from sentinel.query import CallGraph, Edge, get_call_graph
 from sentinel.store.sqlite import SQLiteEventStore
 
 __version__ = "0.0.2"
@@ -35,6 +36,8 @@ __version__ = "0.0.2"
 __all__ = [
     "DEFAULT_BASE_URL",
     "BaseInstrumentor",
+    "CallGraph",
+    "Edge",
     "Event",
     "Instrumentor",
     "InstrumentorNotFoundError",
@@ -45,6 +48,7 @@ __all__ = [
     "SessionContext",
     "__version__",
     "configure",
+    "get_call_graph",
     "get_config",
     "instrument_ollama_call",
     "new_event_id",

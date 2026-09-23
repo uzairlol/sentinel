@@ -17,6 +17,7 @@ def test_top_level_public_names_are_stable() -> None:
     expected = {
         "DEFAULT_BASE_URL",
         "BaseInstrumentor",
+        "Edge",
         "Event",
         "Instrumentor",
         "InstrumentorNotFoundError",
@@ -27,6 +28,7 @@ def test_top_level_public_names_are_stable() -> None:
         "SessionContext",
         "__version__",
         "configure",
+        "get_call_graph",
         "get_config",
         "instrument_ollama_call",
         "new_event_id",
@@ -35,6 +37,10 @@ def test_top_level_public_names_are_stable() -> None:
     # A frozen *subset*: every pinned name stays importable forever; new names
     # may be added as S1 submodules ship.
     assert expected <= set(sentinel.__all__)
+    # S1-T6 additions: the call-graph query helper surface.
+    assert callable(sentinel.get_call_graph)
+    assert not isinstance(sentinel.CallGraph("session"), Exception)
+    assert not isinstance(sentinel.Edge, Exception)
 
 
 def test_instrument_public_names_are_stable() -> None:
