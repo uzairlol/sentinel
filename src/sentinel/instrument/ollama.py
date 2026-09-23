@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from sentinel.instrument.session import SessionContext
-from sentinel.models.events import LLM_REQUEST, LLM_RESPONSE
+from sentinel.models.events import LLM_REQUEST, LLM_RESPONSE, RefKind, RefLink
 
 DEFAULT_BASE_URL = "http://127.0.0.1:11434"
 CHAT_PATH = "/api/chat"
@@ -69,7 +69,7 @@ async def instrument_ollama_call(
                 "latency_ms": latency_ms,
                 "response": body,
             },
-            refs=[request_event.event_id],
+            refs=[RefLink(event_id=request_event.event_id, kind=RefKind.CAUSED_BY)],
         )
         return body
 
@@ -81,7 +81,7 @@ async def instrument_ollama_call(
             "status_code": response.status_code,
             "latency_ms": latency_ms,
         },
-        refs=[request_event.event_id],
+        refs=[RefLink(event_id=request_event.event_id, kind=RefKind.CAUSED_BY)],
     )
     raise OllamaChatError(
         f"Ollama /api/chat returned {response.status_code}: {response.text[:200]!r}"

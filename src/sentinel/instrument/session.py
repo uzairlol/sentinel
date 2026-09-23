@@ -17,6 +17,7 @@ from sentinel.models.events import (
     SESSION_END,
     SESSION_START,
     Event,
+    RefLink,
     make_event,
     new_event_id,
 )
@@ -37,7 +38,13 @@ class SessionContext:
         self._closed = False
         self.session_id = new_event_id()
 
-    async def _emit(self, *, type: str, payload: Mapping[str, Any], refs: Sequence[str]) -> Event:  # noqa: A002
+    async def _emit(
+        self,
+        *,
+        type: str,  # noqa: A002
+        payload: Mapping[str, Any],
+        refs: Sequence[RefLink | str],
+    ) -> Event:
         event = make_event(
             session_id=self.session_id,
             seq=self._seq + 1,
@@ -58,7 +65,7 @@ class SessionContext:
         *,
         type: str,  # noqa: A002
         payload: Mapping[str, Any] | None = None,
-        refs: Sequence[str] = (),
+        refs: Sequence[RefLink | str] = (),
     ) -> Event:
         """Append one event to the session and return its persisted form."""
         if self._closed:

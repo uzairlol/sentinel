@@ -13,6 +13,7 @@ import respx
 
 from sentinel import SQLiteEventStore, instrument_ollama_call, session
 from sentinel.instrument.ollama import OllamaChatError
+from sentinel.models.events import RefKind
 
 FAKE_REPLY = {
     "model": "llama3.2",
@@ -56,7 +57,8 @@ async def test_instrumented_ollama_call_round_trips() -> None:
         ]
 
         assert response_event.type == "llm.response"
-        assert response_event.refs == [request_event.event_id]
+        assert [link.event_id for link in response_event.refs] == [request_event.event_id]
+        assert response_event.refs[0].kind == RefKind.CAUSED_BY
         assert response_event.payload["status_code"] == 200
         assert response_event.payload["latency_ms"] >= 0
         assert response_event.payload["response"] == FAKE_REPLY
@@ -86,7 +88,8 @@ async def test_ollama_error_is_captured_then_raised() -> None:
         events = await store.get_session(ctx.session_id)
         assert events[-2].type == "llm.response"
         assert events[-2].payload["status_code"] == 500
-        assert events[-2].refs == [events[-3].event_id]
+        assert events[-2].refs[0].kind == RefKind.CAUSED_BY
+        assert events[-2].refs[0].event_id == events[-3].event_id
     finally:
         await store.close()
 

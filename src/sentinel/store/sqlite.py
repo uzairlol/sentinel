@@ -15,7 +15,8 @@ from datetime import UTC, datetime
 
 import aiosqlite
 
-from sentinel.models.events import Event
+from sentinel.models.events import Event, RefLink
+from sentinel.store.errors import RefIntegrityError
 from sentinel.store.protocol import EventStore
 
 _SCHEMA = """
@@ -60,6 +61,9 @@ class SQLiteEventStore(EventStore):
         Re-appending the same ``event_id`` is a no-op (idempotency, INV-2).
         Appending a *different* event with an already-used ``(session_id, seq)``
         raises :class:`sqlite3.IntegrityError` so replay ordering stays total.
+        Every reference in ``event.refs`` must resolve to an event already
+        persisted in the same session, otherwise
+        :class:`RefIntegrityError` is raised (INV-3).
         """
         conn = await self._conn()
         async with self._lock:
@@ -68,6 +72,20 @@ class SQLiteEventStore(EventStore):
             )
             if await cursor.fetchone() is not None:
                 return
+            if event.refs:
+                placeholders = ",".join("?" for _ in event.refs)
+                cursor = await conn.execute(
+                    "SELECT event_id FROM events "  # noqa: S608 -- placeholders are literal "?" tokens, never user input
+                    f"WHERE session_id = ? AND event_id IN ({placeholders})",
+                    [event.session_id, *(link.event_id for link in event.refs)],
+                )
+                known = {row["event_id"] for row in await cursor.fetchall()}
+                missing = [link for link in event.refs if link.event_id not in known]
+                if missing:
+                    raise RefIntegrityError(
+                        f"event {event.event_id!r} references events not in "
+                        f"session {event.session_id!r}: " + ", ".join(m.event_id for m in missing)
+                    )
             await conn.execute(
                 "INSERT INTO events "
                 "(event_id, session_id, seq, ts, type, payload, refs, schema_version) "
@@ -79,7 +97,7 @@ class SQLiteEventStore(EventStore):
                     event.ts.isoformat(),
                     event.type,
                     json.dumps(event.payload),
-                    json.dumps(event.refs),
+                    json.dumps([link.model_dump() for link in event.refs]),
                     event.schema_version,
                 ),
             )
@@ -119,7 +137,7 @@ def _row_to_event(row: sqlite3.Row) -> Event:
         ts=_parse_ts(ts),
         type=type_,
         payload=json.loads(payload),
-        refs=json.loads(refs),
+        refs=[RefLink(**link) for link in json.loads(refs)],
         schema_version=schema_version,
     )
 

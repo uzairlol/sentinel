@@ -14,6 +14,7 @@ from hypothesis import strategies as st
 
 from sentinel import SQLiteEventStore
 from sentinel.instrument.session import SessionContext
+from sentinel.models.events import TOOL_CALL
 
 
 async def _run_range(payloads: list[int]) -> None:
@@ -23,7 +24,7 @@ async def _run_range(payloads: list[int]) -> None:
         await ctx.start()
         emitted_ids: list[str] = []
         for index, value in enumerate(payloads):
-            event = await ctx.capture(type="evt", payload={"i": index, "v": value})
+            event = await ctx.capture(type=TOOL_CALL, payload={"i": index, "v": value})
             emitted_ids.append(event.event_id)
         session_id = ctx.session_id
         await ctx.end()

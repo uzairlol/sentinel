@@ -9,11 +9,20 @@ from pathlib import Path
 import pytest
 
 from sentinel import SQLiteEventStore
-from sentinel.models.events import Event, new_event_id
+from sentinel.models.events import (
+    LLM_REQUEST,
+    LLM_RESPONSE,
+    TOOL_CALL,
+    Event,
+    RefKind,
+    RefLink,
+    new_event_id,
+)
+from sentinel.store.errors import RefIntegrityError
 from sentinel.store.sqlite import _parse_ts
 
 
-def _event(session_id: str, seq: int, type_: str = "test.type") -> Event:
+def _event(session_id: str, seq: int, type_: str = TOOL_CALL) -> Event:
     return Event(
         event_id=new_event_id(),
         session_id=session_id,
@@ -60,9 +69,41 @@ async def test_conflicting_session_seq_raises_integrity_error() -> None:
     store = SQLiteEventStore(":memory:")
     try:
         session_id = new_event_id()
-        await store.append(_event(session_id, 0, type_="first"))
+        await store.append(_event(session_id, 0, type_=LLM_REQUEST))
         with pytest.raises(sqlite3.IntegrityError):
-            await store.append(_event(session_id, 0, type_="second"))
+            await store.append(_event(session_id, 0, type_=TOOL_CALL))
+    finally:
+        await store.close()
+
+
+async def test_append_enforces_referential_integrity() -> None:
+    store = SQLiteEventStore(":memory:")
+    try:
+        session_id = new_event_id()
+        with pytest.raises(RefIntegrityError):
+            await store.append(
+                _event(session_id, 0, type_=LLM_RESPONSE).model_copy(
+                    update={"refs": [RefLink(event_id=new_event_id(), kind=RefKind.CAUSED_BY)]}
+                )
+            )
+    finally:
+        await store.close()
+
+
+async def test_append_accepts_reference_to_existing_event() -> None:
+    store = SQLiteEventStore(":memory:")
+    try:
+        session_id = new_event_id()
+        request = _event(session_id, 0, type_=LLM_REQUEST)
+        await store.append(request)
+        response = _event(session_id, 1, type_=LLM_RESPONSE).model_copy(
+            update={"refs": [RefLink(event_id=request.event_id, kind=RefKind.CAUSED_BY)]}
+        )
+        await store.append(response)
+        replayed = await store.get_session(session_id)
+        assert [e.type for e in replayed] == [LLM_REQUEST, LLM_RESPONSE]
+        assert replayed[1].refs[0].event_id == request.event_id
+        assert replayed[1].refs[0].kind == RefKind.CAUSED_BY
     finally:
         await store.close()
 

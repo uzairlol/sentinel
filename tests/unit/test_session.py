@@ -6,6 +6,7 @@ import pytest
 
 from sentinel import SQLiteEventStore, session
 from sentinel.instrument.session import SessionClosedError
+from sentinel.models.events import RefKind
 
 
 async def test_session_emits_bookends_and_monotonic_seq() -> None:
@@ -16,7 +17,8 @@ async def test_session_emits_bookends_and_monotonic_seq() -> None:
             first = await ctx.capture(type="llm.request", payload={"n": 1})
             second = await ctx.capture(type="llm.response", payload={"n": 2}, refs=[first.event_id])
             assert (first.seq, second.seq) == (1, 2)
-            assert second.refs == [first.event_id]
+            assert [link.event_id for link in second.refs] == [first.event_id]
+            assert second.refs[0].kind == RefKind.PARENT
 
         events = await store.get_session(ctx.session_id)
         assert [e.type for e in events] == [
