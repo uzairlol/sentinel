@@ -15,6 +15,7 @@ Per INV-1 this package only captures; it contains no analysis or evaluation.
 
 from __future__ import annotations
 
+from sentinel.instrument.generic import trace
 from sentinel.instrument.langchain import (
     MAX_CAPTURED_TEXT,
     LangChainInstrumentor,
@@ -61,4 +62,5 @@ __all__ = [
     "chat_completion_stream",
     "instrument_ollama_call",
     "session",
+    "trace",
 ]

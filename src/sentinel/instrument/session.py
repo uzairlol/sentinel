@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from sentinel.capture.writer import BatchedWriter
@@ -27,6 +28,18 @@ from sentinel.store.protocol import EventStore
 
 class SessionClosedError(RuntimeError):
     """Raised when a :class:`SessionContext` receives a capture after ``end()``."""
+
+
+#: The session :func:`session` has opened in the current task, if any. Set on
+#: entering the context and reset on exit, so nested sessions shadow correctly.
+_CURRENT_SESSION: ContextVar[SessionContext | None] = ContextVar(
+    "sentinel.current_session", default=None
+)
+
+
+def current_session() -> SessionContext | None:
+    """Return the :class:`SessionContext` active in this task, if any."""
+    return _CURRENT_SESSION.get()
 
 
 class SessionContext:
@@ -111,6 +124,7 @@ async def session(
     """
     ctx = SessionContext(store, writer=writer)
     started = False
+    token = _CURRENT_SESSION.set(ctx)
     try:
         await ctx.start()
         started = True
@@ -120,3 +134,4 @@ async def session(
             await ctx.end()
         if writer is not None:
             await writer.flush()
+        _CURRENT_SESSION.reset(token)

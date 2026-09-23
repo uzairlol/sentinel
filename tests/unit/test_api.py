@@ -65,6 +65,9 @@ def test_instrument_public_names_are_stable() -> None:
     } <= set(sentinel.instrument.__all__)
     # S1-T8 additions: the LangGraph capture surface.
     assert {"LangGraphInstrumentor"} <= set(sentinel.instrument.__all__)
+    # S1-T10 additions: the generic trace decorator for custom functions/tools.
+    assert {"trace"} <= set(sentinel.instrument.__all__)
+    assert callable(sentinel.instrument.trace)
 
 
 def test_internal_modules_are_not_part_of_the_contract() -> None:
