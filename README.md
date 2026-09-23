@@ -30,6 +30,22 @@ checkpoint until a human approves, rejects, or requests revision.
 - [`docs/design/safety_sdk.tex`](docs/design/safety_sdk.tex) — original conceptual design (LaTeX)
 - [`docs/design/safety_sdk.pdf`](docs/design/safety_sdk.pdf) — compiled version of the original design
 
+## Quickstart (vertical slice, `S0`)
+
+Capture one chat call from a local Ollama server and replay it losslessly:
+
+```bash
+uv sync
+uv run python examples/hello_ollama.py
+
+# replay any captured session by id:
+uv run sentinel replay <session_id> --store hello_ollama.sqlite3
+```
+
+The example wraps a single `POST /api/chat`, writes an `llm.request` and an
+`llm.response` event (plus `session.start`/`session.end` bookends) to a SQLite
+event store, and replays the session in order.
+
 ## Repository layout
 
 ```

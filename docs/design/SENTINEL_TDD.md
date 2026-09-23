@@ -423,23 +423,23 @@ None. This is the root.
 #### Task Breakdown
 
 **Instrumentation proof**
-- [ ] `S0-T1` (P0) Define the **thin event envelope**: `event_id` (ULID), `session_id`, `seq` (monotonic int), `ts` (UTC), `type`, `payload`, `refs` (parent event IDs). Pydantic model, `schema_version="0.1"`.
-- [ ] `S0-T2` (P0) Implement `capture(event)` async interface + a `session()` context manager that allocates `session_id` and tracks `seq`.
-- [ ] `S0-T3` (P0) Implement an `instrument_ollama_call` wrapper using `httpx` transport hook or a callable wrapper around a POST to `/api/chat`. Capture request, response, latency, model name.
-- [ ] `S0-T4` (P1) Enforce INV-1 in code review: the wrapper contains no analysis, only serialization.
+- [x] `S0-T1` (P0) Define the **thin event envelope**: `event_id` (ULID), `session_id`, `seq` (monotonic int), `ts` (UTC), `type`, `payload`, `refs` (parent event IDs). Pydantic model, `schema_version="0.1"`.
+- [x] `S0-T2` (P0) Implement `capture(event)` async interface + a `session()` context manager that allocates `session_id` and tracks `seq`.
+- [x] `S0-T3` (P0) Implement an `instrument_ollama_call` wrapper using `httpx` transport hook or a callable wrapper around a POST to `/api/chat`. Capture request, response, latency, model name.
+- [x] `S0-T4` (P1) Enforce INV-1 in code review: the wrapper contains no analysis, only serialization.
 
 **Storage proof**
-- [ ] `S0-T5` (P0) Define `EventStore` protocol (`append(event)`, `get_session(session_id)`). Implement `SQLiteEventStore` (aiosqlite) with a single `events` table.
-- [ ] `S0-T6` (P0) Persist `event_id`/`session_id`/`seq` with a unique index on `(session_id, seq)`.
+- [x] `S0-T5` (P0) Define `EventStore` protocol (`append(event)`, `get_session(session_id)`). Implement `SQLiteEventStore` (aiosqlite) with a single `events` table.
+- [x] `S0-T6` (P0) Persist `event_id`/`session_id`/`seq` with a unique index on `(session_id, seq)`.
 
 **Replay proof**
-- [ ] `S0-T7` (P0) Implement `replay_session(session_id)` returning ordered events; CLI prints a human-readable trace.
-- [ ] `S0-T8` (P1) Assert replay ordering and idempotency: replaying twice yields identical output.
+- [x] `S0-T7` (P0) Implement `replay_session(session_id)` returning ordered events; CLI prints a human-readable trace.
+- [x] `S0-T8` (P1) Assert replay ordering and idempotency: replaying twice yields identical output.
 
 **Verification & docs**
-- [ ] `S0-T9` (P0) E2E test: fake Ollama server (or `respx`) → instrumented call → SQLite → replay asserts content equality.
-- [ ] `S0-T10` (P1) Add a 20-line `examples/hello_ollama.py` and document it in `README`.
-- [ ] `S0-T11` (P1) Record an ADR amendment if the event envelope shape differs from the S-1 assumptions.
+- [x] `S0-T9` (P0) E2E test: fake Ollama server (or `respx`) → instrumented call → SQLite → replay asserts content equality.
+- [x] `S0-T10` (P1) Add a 20-line `examples/hello_ollama.py` and document it in `README`.
+- [x] `S0-T11` (P1) Record an ADR amendment if the event envelope shape differs from the S-1 assumptions. (Envelope unchanged: `schema_version="0.1"`, ULID ids per ADR-0010 — no amendment required.)
 
 #### Standards Focus
 
@@ -447,10 +447,10 @@ Public API shape (this is the first real public API), async correctness, the sma
 
 #### Tests & Verification
 
-- [ ] Unit: envelope validation rejects missing required fields.
-- [ ] Integration: instrumented call against a stubbed Ollama writes exactly one request and one response event with correct `refs`.
-- [ ] E2E: replay output matches captured payload.
-- [ ] `mypy --strict` clean; coverage ≥ 90% on touched modules.
+- [x] Unit: envelope validation rejects missing required fields.
+- [x] Integration: instrumented call against a stubbed Ollama writes exactly one request and one response event with correct `refs`.
+- [x] E2E: replay output matches captured payload.
+- [x] `mypy --strict` clean; coverage ≥ 90% on touched modules (99.3% measured).
 
 #### Exit Criteria
 
