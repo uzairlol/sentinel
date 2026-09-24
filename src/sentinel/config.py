@@ -49,9 +49,25 @@ class SentinelSettings(BaseSettings):
     batch_flush_interval_ms: int = Field(default=250, ge=1)
     queue_max_size: int = Field(default=10_000, ge=1)
 
-    #: Planned sampling support (``S1-T15``, deferred to ``S2``); accepted in
-    #: config so deployments can set it before the behaviour lands.
+    #: Per-event payload cap (``S1-T16``): larger payloads survive as a
+    #: truncated copy carrying a ``_truncated`` marker and a hash of the
+    #: original, never as a retained multi-MB blob.
+    max_payload_bytes: int = Field(default=65_536, ge=1)
+
+    #: Sampling (``S1-T15``): capture ``sample_rate`` of non-critical events.
+    #: Errors and gating-relevant events are always captured regardless, and a
+    #: sampled-out event is marked, never silently dropped, so ``seq`` stays
+    #: contiguous (lossless replay semantics preserved).
     sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
+
+    #: Postgres pool / retry tuning (``S2-T14``). Transient database errors are
+    #: retried with jitter up to ``store_retry_attempts``; integrity errors are
+    #: never retried.
+    store_pool_size: int = Field(default=10, ge=1)
+    store_max_overflow: int = Field(default=5, ge=0)
+    store_pool_timeout_s: float = Field(default=30.0, ge=1.0)
+    store_retry_attempts: int = Field(default=3, ge=1)
+    store_retry_jitter_ms: float = Field(default=50.0, ge=0.0)
 
 
 _settings: SentinelSettings | None = None

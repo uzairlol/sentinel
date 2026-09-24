@@ -136,6 +136,9 @@ fixable = ["ALL"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN", "D", "S101"]
 "docs/**" = ["D"]
+"src/sentinel/store/postgres.py" = [
+    "N806",  # local aliases for ORM model classes (EventRecord, SessionRecord, ...)
+]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

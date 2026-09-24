@@ -28,6 +28,9 @@ from sentinel.models.events import (
     RefLink,
     new_event_id,
 )
+from sentinel.store.gaps import SeqGap
+from sentinel.store.reporting import CallEdge, SessionSummary, StoreHealth
+from sentinel.store.retention import PruneReport, RetentionPolicy
 
 pytestmark = pytest.mark.unit
 
@@ -147,11 +150,13 @@ async def test_steps_and_memory_reads_are_queryable(events_store: SQLiteEventSto
     assert [event.type for event in reads] == [MEMORY_READ]
 
 
-async def test_dangling_ref_is_dropped_not_raised() -> None:
+async def test_dangling_ref_is_dropped_not_raised(events_store: SQLiteEventStore) -> None:
     """INV-6: the helper degrades gracefully instead of raising."""
 
     @dataclass
     class _ForgetfulStore:
+        store: SQLiteEventStore
+
         async def get_session(self, session_id: str) -> list[Event]:
             request = Event(
                 event_id=new_event_id(),
@@ -173,12 +178,55 @@ async def test_dangling_ref_is_dropped_not_raised() -> None:
             return [request, shady]
 
         async def append(self, event: Event) -> None:
-            raise NotImplementedError
+            await self.store.append(event)
+
+        async def append_batch(self, events: list[Event]) -> None:
+            await self.store.append_batch(events)
+
+        def iter_session(
+            self,
+            session_id: str,
+            *,
+            after_seq: int | None = None,
+            limit: int | None = None,
+        ) -> AsyncIterator[Event]:
+            return self.store.iter_session(session_id, after_seq=after_seq, limit=limit)
+
+        async def get_call_graph(self, session_id: str) -> list[CallEdge]:
+            return await self.store.get_call_graph(session_id)
+
+        async def list_sessions(
+            self,
+            *,
+            agent_id: str | None = None,
+            since: datetime.datetime | None = None,
+            until: datetime.datetime | None = None,
+            has_flags: bool = False,
+            limit: int = 100,
+            offset: int = 0,
+        ) -> list[SessionSummary]:
+            return await self.store.list_sessions(
+                agent_id=agent_id,
+                since=since,
+                until=until,
+                has_flags=has_flags,
+                limit=limit,
+                offset=offset,
+            )
+
+        async def detect_gaps(self, session_id: str) -> list[SeqGap]:
+            return await self.store.detect_gaps(session_id)
+
+        async def health(self) -> StoreHealth:
+            return await self.store.health()
+
+        async def prune(self, policy: RetentionPolicy) -> PruneReport:
+            return await self.store.prune(policy)
 
         async def close(self) -> None:
-            raise NotImplementedError
+            await self.store.close()
 
-    graph = await get_call_graph(_ForgetfulStore(), "session")
+    graph = await get_call_graph(_ForgetfulStore(events_store), "session")
     assert len(graph.nodes) == 2
     assert graph.edges == []
     _ = graph.parents  # no crash on the shady node
