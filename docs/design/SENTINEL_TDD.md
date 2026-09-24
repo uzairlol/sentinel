@@ -194,7 +194,7 @@ A work item is **Done** only when all hold:
 |---|---|---|
 | Instrumentation overhead per event | p99 < 5 ms added, non-blocking | S2 (measure), S10 (optimize) |
 | Capture losslessness at target load | 0 dropped events at 200 events/s | S2 |
-| Event write (local Postgres) | p99 < 10 ms | S2 |
+| Event write (local Postgres) | p99 < 10 ms — **measured 2026-09-24: 1.45 ms batch / 6.54 ms single** (`perf/write-benchmark.md`) | S2 |
 | Claim extraction | p95 < 500 ms per output | S3 |
 | Embedding drift eval | p95 < 1 s per memory write | S4 |
 | Flag availability after eval | < 60 s end-to-end | S7 |
@@ -290,7 +290,7 @@ See [`§2.11`](#211-gate-failure-protocol). Restated for emphasis: **a failed ga
 | `S-1` | `-1 → 0` | `[x]` | Passed | Gate green on `main` (lint, typecheck, test 3.12/3.13, security, build, docs). Branch protection enabled, `v0.0.1` GPG-signed tag. |
 | `S0` | `0 → 5` | `[x]` | Passed | Vertical slice green on `main`: event envelope, session/raw-`instrument_ollama_call` capture, SQLite store, `sentinel replay` CLI, E2E vs respx-stubbed Ollama. 31 tests / 99.3% coverage, `mypy --strict` clean, `v0.0.2` tagged. |
 | `S1` | `5 → 15` | `[x]` | Passed | Instrumentation layer core green on `main`: event taxonomy + INV-3 refs, registry/config, capture worker (bounded queue, fail-open, redaction), LangChain + LangGraph + raw-Ollama/OpenAI-compat + generic `trace` + memory adapters, call-graph query helper. 115 tests / 95.3% coverage, `mypy --strict`/ruff/format/pre-commit clean, `v0.0.3` tagged. `S1-T15` sampling and `S1-T16` streaming caps deferred to `S2`. |
-| `S2` | `15 → 25` | `[ ]` | — | — |
+| `S2` | `15 → 25` | `[x]` | Passed | Event store hardening green on `main`: Alembic migrations, Postgres store (batched append, streaming replay, call graph, session listing, health, gap detection, keyset retention prune with tombstones), SQLite/Postgres parity contract, 1M-event losslessness gate, truncation (`S1-T16`) + sampling (`S1-T15`), least-privilege DB roles + compose reference stack. 190 tests / 92.4% coverage, `mypy --strict`/ruff/bandit clean; `S2-T19` backup/restore smoke skips where `pg_dump`/`psql` are absent (runs in CI with tooling). |
 | `S3` | `25 → 35` | `[ ]` | — | — |
 | `S4` | `35 → 45` | `[ ]` | — | — |
 | `S5` | `45 → 55` | `[ ]` | — | — |
@@ -523,8 +523,8 @@ A working "spine". Sprint `S1` widens capture to all boundaries (LLM, tools, mem
 - [x] `S1-T12` (P0) Async batching writer with bounded queue; on overflow emit `capture.dropped` (counted, surfaced) rather than blocking the agent.
 - [x] `S1-T13` (P0) Fail-open default for capture: exceptions in capture are logged, counted, and swallowed; the host call proceeds. Configurable to fail-closed.
 - [x] `S1-T14` (P0) Redaction hook executed before persistence; block obvious secrets; configurable per-field strategy.
-- [ ] `S1-T15` (P1) Sampling support (capture N% of non-critical events) with guaranteed capture of errors and gating-relevant events. *(deferred to `S2`)*
-- [ ] `S1-T16` (P1) Streaming-safe serialization: cap payload size with truncation markers + hash, never store more than a configured maximum per event. *(deferred to `S2`)*
+- [x] `S1-T15` (P1) Sampling support (capture N% of non-critical events) with guaranteed capture of errors and gating-relevant events. *(done in `S2`)*
+- [x] `S1-T16` (P1) Streaming-safe serialization: cap payload size with truncation markers + hash, never store more than a configured maximum per event. *(done in `S2`)*
 
 **Docs & examples**
 - [x] `S1-T17` (P0) `docs/event-schema.md` describing every event type, payload fields, refs, and `schema_version` evolution rules.
@@ -543,7 +543,7 @@ Public API stability, async correctness, back-pressure, redaction/security, sche
 - [ ] Failure injection: store raises → agent call still returns; `capture.dropped` recorded.
 - [ ] Streaming test: a chunked LLM stream is reconstructed to the same payload as a non-streamed equivalent.
 - [ ] Redaction tests: injected API key/token is absent from persisted payload.
-- [ ] Overhead micro-benchmark recorded (baseline for `S2`/`S10`).
+- [x] Overhead micro-benchmark recorded (baseline for `S2`/`S10`): `perf/overhead-baseline.md` (2026-09-23).
 
 #### Exit Criteria
 
@@ -601,31 +601,31 @@ Complete, lossless capture across all three boundaries. `S2` hardens storage, mi
 #### Task Breakdown
 
 **Schema & migrations**
-- [ ] `S2-T1` (P0) SQLAlchemy 2.0 declarative models: `sessions`, `events`, `event_refs`, `flags`, plus a `schema_meta` table. UUID/ULID columns typed correctly.
-- [ ] `S2-T2` (P0) Alembic environment with async engine; initial migration `0001_initial`; migration test that applies to an empty DB and downgrades cleanly.
-- [ ] `S2-T3` (P0) Enforce append-only: writer role has `INSERT`/`SELECT` only; `UPDATE`/`DELETE` revoked. Document the three roles: `sentinel_migrator`, `sentinel_writer`, `sentinel_reader`.
-- [ ] `S2-T4` (P0) Constraints: unique `(session_id, seq)`; unique `event_id`; FK from `event_refs.event_id`/`ref_event_id` to `events`; `flags.event_id` FK.
-- [ ] `S2-T5` (P0) Indexes: `(session_id, seq)`, `(session_id, type, ts)`, `(ts)` for retention, `(flag.severity, flag.created_at)` for the gate, GIN on refs if needed.
-- [ ] `S2-T6` (P1) JSONB payload with a `schema_version` column; add a validation-on-read path for older schema versions (INV / ADR-0007).
+- [x] `S2-T1` (P0) SQLAlchemy 2.0 declarative models: `sessions`, `events`, `event_refs`, `flags`, plus a `schema_meta` table. UUID/ULID columns typed correctly.
+- [x] `S2-T2` (P0) Alembic environment with async engine; initial migration `0001_initial`; migration test that applies to an empty DB and downgrades cleanly.
+- [x] `S2-T3` (P0) Enforce append-only: writer role has `INSERT`/`SELECT` only; `UPDATE`/`DELETE` revoked. Document the three roles: `sentinel_migrator`, `sentinel_writer`, `sentinel_reader`.
+- [x] `S2-T4` (P0) Constraints: unique `(session_id, seq)`; unique `event_id`; FK from `event_refs.event_id`/`ref_event_id` to `events`; `flags.event_id` FK.
+- [x] `S2-T5` (P0) Indexes: `(session_id, seq)`, `(session_id, type, ts)`, `(ts)` for retention, `(flag.severity, flag.created_at)` for the gate, GIN on refs if needed.
+- [x] `S2-T6` (P1) JSONB payload with a `schema_version` column; add a validation-on-read path for older schema versions (INV / ADR-0007).
 
 **Query & replay layer**
-- [ ] `S2-T7` (P0) `get_session(session_id)` ordered by `seq`, plus `iter_session` streaming for large sessions.
-- [ ] `S2-T8` (P0) Call-graph query: `get_call_graph(session_id)` returning typed edges.
-- [ ] `S2-T9` (P0) Session listing/search by time range, agent id, and flag presence.
-- [ ] `S2-T10` (P0) Replay CLI upgraded: `sentinel replay --session <id> [--json|--pretty]`, and `sentinel sessions list`.
-- [ ] `S2-T11` (P1) A `store health` command reporting gaps, row counts, oldest/newest event, and worker lag placeholders for `S7`.
+- [x] `S2-T7` (P0) `get_session(session_id)` ordered by `seq`, plus `iter_session` streaming for large sessions.
+- [x] `S2-T8` (P0) Call-graph query: `get_call_graph(session_id)` returning typed edges.
+- [x] `S2-T9` (P0) Session listing/search by time range, agent id, and flag presence.
+- [x] `S2-T10` (P0) Replay CLI upgraded: `sentinel replay --session <id> [--json|--pretty]`, and `sentinel sessions list`.
+- [x] `S2-T11` (P1) A `store health` command reporting gaps, row counts, oldest/newest event, and worker lag placeholders for `S7`.
 
 **Retention, integrity, operations**
-- [ ] `S2-T12` (P0) Retention policy engine: per-event-type TTL, legal-hold override, tombstone records for deletions, and a documented compliance story (references `S12`).
-- [ ] `S2-T13` (P0) Gap detector: given a session, assert `seq` is contiguous; emit an ops metric and a report for missing ranges.
-- [ ] `S2-T14` (P1) Backpressure/connection-pool tuning; bounded writer concurrency; timeouts and retry-with-jitter on transient DB errors (but never on append-only violations).
-- [ ] `S2-T15` (P1) `docker compose` reference deployment: Postgres + a capture service + migration runner.
+- [x] `S2-T12` (P0) Retention policy engine: per-event-type TTL, legal-hold override, tombstone records for deletions, and a documented compliance story (references `S12`).
+- [x] `S2-T13` (P0) Gap detector: given a session, assert `seq` is contiguous; emit an ops metric and a report for missing ranges.
+- [x] `S2-T14` (P1) Backpressure/connection-pool tuning; bounded writer concurrency; timeouts and retry-with-jitter on transient DB errors (but never on append-only violations).
+- [x] `S2-T15` (P1) `docker compose` reference deployment: Postgres + a capture service + migration runner.
 
 **Verification**
-- [ ] `S2-T16` (P0) Losslessness load test: emit 1,000,000 events across 1,000 sessions; assert zero gaps and exact counts.
-- [ ] `S2-T17` (P0) Parity tests: SQLite and Postgres stores satisfy the same protocol contract tests.
-- [ ] `S2-T18` (P1) Migration compatibility: a fixture DB from the previous schema version reads correctly.
-- [ ] `S2-T19` (P1) Backup/restore smoke: `pg_dump`/restore a seeded DB and assert replay equality.
+- [x] `S2-T16` (P0) Losslessness load test: emit 1,000,000 events across 1,000 sessions; assert zero gaps and exact counts.
+- [x] `S2-T17` (P0) Parity tests: SQLite and Postgres stores satisfy the same protocol contract tests.
+- [x] `S2-T18` (P1) Migration compatibility: a fixture DB from the previous schema version reads correctly.
+- [x] `S2-T19` (P1) Backup/restore smoke: `pg_dump`/restore a seeded DB and assert replay equality.
 
 #### Standards Focus
 
@@ -633,12 +633,12 @@ Data modeling, migrations, DB security/least privilege, performance budgets, com
 
 #### Tests & Verification
 
-- [ ] Integration against a real Postgres (testcontainers or CI service).
-- [ ] Property: append is idempotent by `event_id`; re-appending is a no-op, not a duplicate.
-- [ ] Property: `seq` ordering is total and gap-free per session.
-- [ ] Perf: event write p99 < 10 ms at target concurrency; documented numbers.
-- [ ] Ops: gap detector correctly identifies a deliberately injected missing `seq`.
-- [ ] Restore drill executed and recorded.
+- [x] Integration against a real Postgres (testcontainers or CI service): CI `integration-postgres` job against a Postgres service container; exercised locally against Postgres 18.4.
+- [x] Property: append is idempotent by `event_id`; re-appending is a no-op, not a duplicate: `test_store_parity.py::test_append_is_idempotent_by_event_id` on both stores + `tests/property/test_replay_and_seq.py`.
+- [x] Property: `seq` ordering is total and gap-free per session: replay-order parity tests + `tests/property/test_replay_and_seq.py` + the 1M-event losslessness gate (zero gaps).
+- [x] Perf: event write p99 < 10 ms at target concurrency; documented numbers: `perf/write-benchmark.md` — `append_batch` p99 1.45 ms/event, single `append` p99 6.54 ms (local Postgres, 2026-09-24).
+- [x] Ops: gap detector correctly identifies a deliberately injected missing `seq`: `test_store_parity.py::test_detect_gaps` on a holey session (both stores).
+- [x] Restore drill executed and recorded: `tests/integration/test_backup_restore.py` (pg_dump → restore → replay equality); runs in CI when `pg_dump`/`psql` are on PATH, skips locally.
 
 #### Exit Criteria
 
@@ -667,12 +667,12 @@ A trustworthy, queryable, production-grade event store. This is the **MVP-ready 
 
 #### GO / NO-GO Checklist
 
-- [ ] All Exit Criteria rows pass.
-- [ ] Losslessness proven at target load.
-- [ ] Migrations and restore drill recorded.
-- [ ] Status Board updated: `S2` = `[x]`.
-- [ ] No open `gate-failure` issue.
-- [ ] If losslessness is not proven → **NO-GO**; evaluators on lossy data produce untrustworthy flags.
+- [x] All Exit Criteria rows pass. (1×CI migrations+parity, 2×1M load gate, 3×p99 numbers recorded in `perf/write-benchmark.md`, 4×DB role test, 5×retention/tombstone/legal-hold tested, 6×replay CLI vs Postgres e2e + compose stack, 7×backup/restore smoke.)
+- [x] Losslessness proven at target load (1M events / 1,000 sessions, zero gaps).
+- [x] Migrations and restore drill recorded (Alembic apply/downgrade tests; `pg_dump` restore smoke in CI).
+- [x] Status Board updated: `S2` = `[x]`.
+- [x] No open `gate-failure` issue.
+- [x] If losslessness is not proven → **NO-GO**; evaluators on lossy data produce untrustworthy flags. *(Proven — GO.)*
 
 ---
 
@@ -1871,6 +1871,7 @@ sentinel/
 
 | Version | Date | Change |
 |---|---|---|
+| v1.5 | 2026-09-24 | Sprint `S2` gate passed: event store green (190 tests / 92.4% coverage, `mypy --strict`/ruff/bandit clean). All `S2-T1…T19` tasks checked off; `S1-T15` sampling and `S1-T16` truncation landed as part of `S2` (previously deferred). Added ADR-0011 (least-privilege DB roles), `deploy/roles.sql`, `deploy/compose.postgres.yml` + migration runner + demo capture worker, CI integration/load jobs. `S2-T19` backup/restore smoke skips without `pg_dump`/`psql` (runs in CI with tooling). |
 | v1.4 | 2026-09-23 | Sprint `S1` gate passed: instrumentation layer core green on `main` (taxonomy/refs/registry/config, capture worker, langchain/langgraph/openai-compat/memory/generic instrumentors, call-graph helper; 115 tests / 95.3% coverage, `mypy --strict`), `v0.0.3` GPG-signed tag. `S1-T15`/`S1-T16` deferred to `S2`. |
 | v1.3 | 2026-09-23 | Sprint `S0` gate passed: vertical slice green on `main` (31 tests / 99.3% coverage, `mypy --strict`), `v0.0.2` GPG-signed tag. |
 | v1.2 | 2026-09-23 | Sprint `S-1` gate passed: CI green on `main`, branch protection enabled, `v0.0.1` GPG-signed tag pushed. Sprint `S0` (vertical slice) in progress. |

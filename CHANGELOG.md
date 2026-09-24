@@ -5,6 +5,41 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.4] - 2026-09-24
+
+Sprint `S2` — Event Store Hardening & Query/Replay.
+
+### Added
+
+- SQLAlchemy 2.0 Alembic-managed Postgres store (`PostgresEventStore`) with
+  versioned schema (`0001_initial`), unique `(session_id, seq)` + `event_id`
+  constraints, FKs, and query indexes.
+- Store protocol (ADR-0002) surface: batched append (idempotent by `event_id`,
+  atomic on reference-integrity violation), streaming `iter_session`, call-graph
+  and session-listing queries, `health`, gap detection, and keyset-paginated
+  retention pruning with tombstone records.
+- Least-privilege DB roles (`deploy/roles.sql`): `sentinel_migrator` /
+  `sentinel_writer` / `sentinel_reader` (ADR-0011), enforced by
+  `tests/integration/test_db_roles.py`.
+- Reference compose stack (`deploy/compose.postgres.yml`): Postgres +
+  Alembic migration runner + demo capture worker.
+- `sentinel` CLI: `sessions list` and `store health` subcommands, `--dsn`
+  cross-store selection, `--json`/`--pretty` output.
+- Payload truncation with markers + SHA-256 digest (`S1-T16`) and proportional
+  sampling with guaranteed critical/error capture (`S1-T15`), both
+  `S1`-deferred items.
+- CI: expanded Postgres integration job + 1M-event losslessness load job +
+  Postgres CLI-replay e2e (`tests/e2e/test_cli_replay_postgres.py`).
+- Perf: `perf/bench_writes.py` + `perf/write-benchmark.md` — event write
+  p99 **1.45 ms** (batched) / **6.54 ms** (single commit) on local Postgres,
+  against the 10 ms `S2` budget (SENTINEL_TDD.md §2.7).
+
+### Changed
+
+- `read_compat.materialize_refs` validates on read: 0.1 flat-string ref rows and
+  0.2 typed `RefLink` dicts normalise to a single link shape; malformed entries
+  raise instead of coercing.
+
 ## [0.0.3] - 2026-09-23
 
 Sprint `S1` — Instrumentation Layer Core. Captured under `main` at `ebeab9a` and
