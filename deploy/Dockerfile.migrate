@@ -1,0 +1,21 @@
+# Sentinel migration runner image (deploy/compose.postgres.yml).
+#
+# Runs Alembic migrations against the ``db`` service as ``sentinel_migrator``
+# (deploy/roles.sql). The migrator role is the only identity that owns DDL; the
+# writer/reader roles never see CREATE/ALTER/DROP.
+FROM python:3.12-slim
+
+WORKDIR /srv/sentinel
+
+COPY pyproject.toml uv.lock ./
+COPY alembic.ini .
+COPY alembic ./alembic
+COPY src ./src
+COPY docs ./docs
+COPY deploy ./deploy
+
+RUN pip install --no-cache-dir .
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["alembic", "upgrade", "head"]

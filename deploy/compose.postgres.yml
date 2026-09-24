@@ -1,0 +1,70 @@
+# Sentinel reference Postgres deployment (S2-T15).
+#
+# Three moving parts:
+#
+#   db      - Postgres provisioned with deploy/roles.sql on first boot. The
+#             bundled init script creates the three least-privilege roles
+#             (sentinel_migrator/writer/reader) and revokes public-schema CREATE.
+#   migrate - one-shot runner that applies Alembic migrations as the migrator.
+#             Idempotent: `docker compose run --rm migrate` re-applies safely.
+#   capture - demo capture worker (deploy/capture_service.py) streaming events
+#             into the store as `sentinel_writer` via SENTINEL_STORE_DSN.
+#
+# Quick start:
+#   docker compose -f deploy/compose.postgres.yml up --build -d db migrate
+#   SENTINEL_STORE_DSN=postgresql://sentinel_writer:writer_dev@localhost:5432/sentinel \
+#     .venv/bin/sentinel health --dsn postgresql://sentinel_writer:writer_dev@localhost:5432/sentinel
+#
+# The passwords below are dev placeholders; override via environment
+# (SENTINEL_PG_{MIGRATOR,WRITER,READER}_PASSWORD) for anything shared.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sentinel_migrator
+      POSTGRES_PASSWORD: ${SENTINEL_PG_MIGRATOR_PASSWORD:-migrator_dev}
+      POSTGRES_DB: sentinel
+      # writer/reader passwords are injected by the init script below so the
+      # same variables stay in one place.
+      SENTINEL_WRITER_PASSWORD: ${SENTINEL_PG_WRITER_PASSWORD:-writer_dev}
+      SENTINEL_READER_PASSWORD: ${SENTINEL_PG_READER_PASSWORD:-reader_dev}
+    volumes:
+      - sentinel_pgdata:/var/lib/postgresql/data
+      # roles.sql runs inside the entrypoint's temporary bootstrap server after
+      # POSTGRES_* user/db creation, so it can reference the sentinel_database.
+      - ./roles.sql:/docker-entrypoint-initdb.d/10-roles.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel_migrator -d sentinel"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.migrate
+    environment:
+      SENTINEL_STORE_DSN: postgresql://sentinel_migrator:${SENTINEL_PG_MIGRATOR_PASSWORD:-migrator_dev}@db:5432/sentinel
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  capture:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.migrate
+    command: ["python", "deploy/capture_service.py"]
+    environment:
+      SENTINEL_STORE_DSN: postgresql://sentinel_writer:${SENTINEL_PG_WRITER_PASSWORD:-writer_dev}@db:5432/sentinel
+      SENTINEL_DEMO_INTERVAL: "5"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  sentinel_pgdata:

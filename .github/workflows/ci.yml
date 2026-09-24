@@ -72,14 +72,45 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+          --volume "${{ github.workspace }}/deploy/roles.sql:/docker-entrypoint-initdb.d/10-roles.sql:ro"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
       - run: uv sync --group dev --extra postgres
       - name: Run Postgres adapter integration tests
-        run: uv run pytest tests/integration/test_memory_postgres.py -q --no-cov
+        run: uv run pytest tests/integration/ tests/contract/ tests/e2e/test_cli_replay_postgres.py -q --no-cov
         env:
           SENTINEL_TEST_POSTGRES_DSN: postgresql://sentinel:sentinel@localhost:5432/sentinel_test
+          SENTINEL_STORE_DSN: postgresql://sentinel:sentinel@localhost:5432/sentinel_test
+          SENTINEL_ROLE_WRITER_DSN: postgresql://sentinel_writer:writer_dev@localhost:5432/sentinel_test
+          SENTINEL_ROLE_READER_DSN: postgresql://sentinel_reader:reader_dev@localhost:5432/sentinel_test
+
+  load:
+    name: Load (1M-event losslessness)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel
+          POSTGRES_DB: sentinel_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sentinel"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --group dev --extra postgres
+      - name: Run 1M-event losslessness gate
+        run: uv run pytest tests/perf/test_losslessness.py -q --no-cov
+        env:
+          SENTINEL_TEST_POSTGRES_DSN: postgresql://sentinel:sentinel@localhost:5432/sentinel_test
+          SENTINEL_STORE_DSN: postgresql://sentinel:sentinel@localhost:5432/sentinel_test
 
   security:
     name: Security scan
