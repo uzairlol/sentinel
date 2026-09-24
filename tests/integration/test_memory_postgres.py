@@ -21,6 +21,21 @@ pytestmark = [
 ]
 
 
+@pytest.fixture(autouse=True)
+async def _clean_tables() -> None:
+    """Ensure a blank slate (the suite may run against a persistent DB)."""
+    import asyncpg
+
+    conn = await asyncpg.connect(_DSN or "")
+    try:
+        await conn.execute(
+            "TRUNCATE memory_entries, tombstones, event_refs, flags, events, "
+            "sessions RESTART IDENTITY CASCADE"
+        )
+    finally:
+        await conn.close()
+
+
 @pytest.fixture
 async def store() -> AsyncIterator[PostgresMemoryStore]:
     store = PostgresMemoryStore(_DSN or "")
