@@ -13,7 +13,18 @@ from sentinel.config import (
 )
 
 
-def test_defaults_are_safe_for_unconfigured_processes() -> None:
+def test_defaults_are_safe_for_unconfigured_processes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in (
+        "SENTINEL_CAPTURE_ENABLED",
+        "SENTINEL_FAIL_OPEN",
+        "SENTINEL_REDACTION_ENABLED",
+        "SENTINEL_STORE_DSN",
+        "SENTINEL_BATCH_MAX_SIZE",
+        "SENTINEL_QUEUE_MAX_SIZE",
+    ):
+        monkeypatch.delenv(key, raising=False)
     settings = SentinelSettings()
     assert settings.capture_enabled is True
     assert settings.fail_open is True

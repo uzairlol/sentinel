@@ -6,7 +6,10 @@
   (INV-6). If the queue is full the event is counted as dropped and a
   ``capture.dropped`` marker is appended when room allows (``S1-T12``).
 * flushes in batches, running the redaction hook (``S1-T14``) over each event
-  before it reaches the store.
+  and the size cap (``S1-T16``) before the event reaches the store.
+* applies proportional sampling (``S1-T15``): a sampled-out event is never
+  silently lost — its slot is persisted as a ``capture.dropped`` marker with
+  the same ``seq``, so per-session sequence stays contiguous.
 * fails open by default: an exception while persisting is logged, counted, and
   swallowed so the agent keeps running (``S1-T13``). With ``fail_open=False``
   the first persistence error is recorded, the writer stops, and the next
@@ -24,17 +27,34 @@ interval without a typed sentinel value polluting the queue.
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import Callable, Mapping
 from typing import Any
 
 import structlog
 
-from sentinel.config import get_config
-from sentinel.models.events import CAPTURE_DROPPED, Event, make_event
+from sentinel.config import SentinelSettings, get_config
+from sentinel.models.events import (
+    CAPTURE_DROPPED,
+    ERROR,
+    SESSION_END,
+    SESSION_START,
+    Event,
+    make_event,
+)
 from sentinel.redact import redact_payload
 from sentinel.store.protocol import EventStore
+from sentinel.truncate import truncate_payload
 
 log = structlog.get_logger("sentinel.capture")
+
+#: Events that are never sampled out, regardless of ``sample_rate``
+#: (``S1-T15``). Session boundaries, errors and dropped-markers anchor the
+#: timeline's integrity; dropping them would break replay guarantees.
+ALWAYS_CAPTURE = frozenset({SESSION_START, SESSION_END, ERROR, CAPTURE_DROPPED})
+
+#: ``submit``/``_append`` contract for deciding whether an event is persisted.
+Sampler = Callable[[Event], bool]
 
 
 class CapturePipelineError(RuntimeError):
@@ -53,6 +73,8 @@ class BatchedWriter:
         flush_interval_ms: float = 250.0,
         fail_open: bool = True,
         redactor: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+        sampler: Sampler | None = None,
+        max_payload_bytes: int | None = None,
     ) -> None:
         """Create a writer that persists to *store* through a bounded queue.
 
@@ -60,7 +82,11 @@ class BatchedWriter:
         forced to back-pressure (see :meth:`submit`, INV-6); ``batch_max_size``
         and ``flush_interval_ms`` control how many events ride each batched
         flush; ``fail_open`` toggles the ``S1-T13`` failure boundary; a custom
-        ``redactor`` replaces the default ``S1-T14`` policy.
+        ``redactor`` replaces the default ``S1-T14`` policy; ``sampler``
+        overrides the proportional sampler (``S1-T15``) that invokes it with
+        each event and keeps those it returns ``True`` for; ``max_payload_bytes``
+        caps a persisted event's serialized payload (``S1-T16``), defaulting to
+        :attr:`~sentinel.config.SentinelSettings.max_payload_bytes`.
         """
         self._store = store
         self._queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=queue_max_size)
@@ -68,6 +94,10 @@ class BatchedWriter:
         self._flush_interval = max(0.0, flush_interval_ms / 1000.0)
         self._fail_open = fail_open
         self._redactor = redactor or _default_redactor
+        self._sampler = sampler or _default_sampler(get_config())
+        self._max_payload_bytes = (
+            get_config().max_payload_bytes if max_payload_bytes is None else max_payload_bytes
+        )
         self._task: asyncio.Task[None] | None = None
         self._fatal: BaseException | None = None
         self._stopping = False
@@ -77,6 +107,9 @@ class BatchedWriter:
 
         #: Events dropped on a full queue (never persisted).
         self.dropped = 0
+        #: Events sampled out (never persisted; a ``capture.dropped`` marker
+        #: took their ``seq`` slot instead).
+        self.sampled = 0
         #: Events that failed to persist (capture failures, fail-open only).
         self.failed = 0
         #: The most recent persistence error (or ``None``).
@@ -99,12 +132,22 @@ class BatchedWriter:
         self._task = asyncio.create_task(self._run(), name="sentinel-capture-writer")
 
     async def submit(self, event: Event) -> None:
-        """Queue *event* for async persistence; never blocks the host."""
+        """Queue *event* for async persistence; never blocks the host.
+
+        When the sampler returns ``False`` the event itself is discarded but a
+        ``capture.dropped`` marker (reason ``sampled``) takes its ``seq`` so the
+        store's per-session sequence stays gap-free (``S1-T15``).
+        """
         if self._fatal is not None:
             raise CapturePipelineError(
                 "capture pipeline stopped (fail-closed); event not captured"
             ) from self._fatal
         await self.start()
+        if not self._sampler(event):
+            self.sampled += 1
+            log.debug("capture.sampled", event_id=event.event_id, type=event.type)
+            self._queue_marker(event, reason="sampled", original_type=event.type)
+            return
         try:
             self._queue.put_nowait(event)
         except asyncio.QueueFull:
@@ -134,22 +177,29 @@ class BatchedWriter:
         await self._task
         self._task = None
 
-    def _queue_marker(self, dropped: Event, *, reason: str) -> None:
+    def _queue_marker(
+        self, dropped: Event, *, reason: str, original_type: str | None = None
+    ) -> None:
         """Queue a ``capture.dropped`` marker when room allows.
 
         Carries no ``refs``: the dropped event was never persisted, so a
         structural link would be unresolvable (INV-3). Its id rides in the
-        payload instead.
+        payload instead. The marker reuses ``dropped.seq``, preserving the
+        per-session sequence both when a full queue (``S1-T12``) or the sampler
+        (``S1-T15``) skips an event.
         """
+        payload: dict[str, Any] = {
+            "reason": reason,
+            "count": 1,
+            "dropped_event_id": dropped.event_id,
+        }
+        if original_type is not None:
+            payload["original_type"] = original_type
         marker = make_event(
             session_id=dropped.session_id,
             seq=dropped.seq,
             type=CAPTURE_DROPPED,
-            payload={
-                "reason": reason,
-                "count": 1,
-                "dropped_event_id": dropped.event_id,
-            },
+            payload=payload,
         )
         try:
             self._queue.put_nowait(marker)
@@ -205,9 +255,28 @@ class BatchedWriter:
                 await asyncio.sleep(self._flush_interval)
 
     async def _append(self, event: Event) -> None:
-        """Redact then persist one event."""
+        """Redact (``S1-T14``), cap (``S1-T16``), then persist one event."""
         redacted = self._redactor(event.payload)
-        await self._store.append(event.model_copy(update={"payload": redacted}))
+        bounded = truncate_payload(redacted, max_bytes=self._max_payload_bytes)
+        await self._store.append(event.model_copy(update={"payload": bounded}))
+
+
+def _default_sampler(settings: SentinelSettings) -> Sampler:
+    """Return the proportional sampler backed by ``settings.sample_rate``.
+
+    Events in :data:`ALWAYS_CAPTURE` bypass the coin flip entirely; everything
+    else is kept with probability ``sample_rate``. A rate of ``1.0`` keeps all
+    events and is the deterministic default.
+    """
+
+    def sampler(event: Event) -> bool:
+        rate = settings.sample_rate
+        if event.type in ALWAYS_CAPTURE or rate >= 1.0:
+            return True
+        # sampling cadence, not cryptography: Mersenne-Twister is sufficient
+        return random.random() < rate  # noqa: S311  # nosec B311
+
+    return sampler
 
 
 def _default_redactor(payload: Mapping[str, Any]) -> dict[str, Any]:

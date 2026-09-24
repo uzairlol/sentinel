@@ -217,6 +217,106 @@ async def test_store_error_emits_dropped_marker_with_reason() -> None:
         await store.close()
 
 
+async def test_sampling_drops_marked_slots_instead_of_silent_gaps() -> None:
+    store = SQLiteEventStore(":memory:")
+    try:
+        writer = BatchedWriter(
+            store,
+            batch_max_size=64,
+            flush_interval_ms=0,
+            sampler=lambda e: e.type != "llm.request",
+        )
+        await writer.start()
+        try:
+            await writer.submit(make_event(session_id="s", seq=0, type="session.start", payload={}))
+            for seq in range(1, 6):
+                await writer.submit(_request("s", seq))
+            await writer.submit(make_event(session_id="s", seq=6, type="session.end", payload={}))
+            await writer.flush()
+            assert writer.sampled == 5
+            persisted = await store.get_session("s")
+            assert [e.seq for e in persisted] == [0, 1, 2, 3, 4, 5, 6]
+            markers = [e for e in persisted if e.type == CAPTURE_DROPPED]
+            assert len(markers) == 5
+            assert all(m.payload["reason"] == "sampled" for m in markers)
+            assert all("original_type" in m.payload for m in markers)
+            assert await store.detect_gaps("s") == []
+        finally:
+            await writer.close()
+    finally:
+        await store.close()
+
+
+async def test_sampling_default_captures_critical_types_regardless_of_rate() -> None:
+    store = SQLiteEventStore(":memory:")
+    try:
+        writer = BatchedWriter(
+            store,
+            batch_max_size=64,
+            flush_interval_ms=0,
+            sampler=lambda e: e.type in ("session.start", "session.end", "error", CAPTURE_DROPPED),
+        )
+        await writer.start()
+        try:
+            await writer.submit(make_event(session_id="s", seq=0, type="session.start", payload={}))
+            await writer.submit(_request("s", 1))
+            await writer.submit(make_event(session_id="s", seq=2, type="error", payload={}))
+            await writer.submit(make_event(session_id="s", seq=3, type="session.end", payload={}))
+            await writer.flush()
+            persisted = await store.get_session("s")
+            # sampled-out llm.request keeps its seq slot as a capture.dropped marker
+            assert [e.type for e in persisted] == [
+                "session.start",
+                CAPTURE_DROPPED,
+                "error",
+                "session.end",
+            ]
+            assert await store.detect_gaps("s") == []
+        finally:
+            await writer.close()
+    finally:
+        await store.close()
+
+
+async def test_oversized_payload_is_capped_with_markers() -> None:
+    from sentinel.truncate import TRUNCATED, TRUNCATED_HASH, is_truncated
+
+    store = SQLiteEventStore(":memory:")
+    try:
+        writer = BatchedWriter(store, batch_max_size=64, flush_interval_ms=0, max_payload_bytes=256)
+        await writer.start()
+        try:
+            await writer.submit(_request("s", 0, content="z" * 4096))
+            await writer.flush()
+            persisted = await store.get_session("s")
+            payload = persisted[0].payload
+            assert payload["_truncated"] is True
+            assert payload[TRUNCATED] is True
+            assert len(payload[TRUNCATED_HASH]) == 64
+            assert is_truncated(payload)
+            assert "…[truncated" in payload["message"]
+        finally:
+            await writer.close()
+    finally:
+        await store.close()
+
+
+async def test_small_payloads_pass_through_without_truncation() -> None:
+    store = SQLiteEventStore(":memory:")
+    try:
+        writer = BatchedWriter(store, batch_max_size=64, flush_interval_ms=0, max_payload_bytes=256)
+        await writer.start()
+        try:
+            await writer.submit(_request("s", 0, content="tiny"))
+            await writer.flush()
+            persisted = await store.get_session("s")
+            assert persisted[0].payload == {"message": "tiny"}
+        finally:
+            await writer.close()
+    finally:
+        await store.close()
+
+
 async def test_events_validate_against_locked_taxonomy() -> None:
     assert "llm.request" in EVENT_TYPES
     with pytest.raises(ValueError, match="type must be one of"):
