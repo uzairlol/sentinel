@@ -3,19 +3,27 @@
 Private module. The `sentinel` console script is installed from here, but this
 module is not part of the public API surface (docs/adr/0009).
 
-Sprint ``S0`` adds ``sentinel replay <session_id>`` which prints a human-readable
-trace of a captured session from the event store.
+Sprint ``S0`` adds ``sentinel replay <session_id>``; Sprint ``S2`` (``S2-T10``)
+adds ``--json``/``--pretty`` output, cross-store ``--dsn`` selection, the
+``sessions list`` query surface (``S2-T9``) and ``store health`` (``S2-T11``).
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import sys
+from datetime import datetime
 
 from sentinel import __version__
+from sentinel.store.factory import build_store
+from sentinel.store.protocol import EventStore
 from sentinel.store.sqlite import SQLiteEventStore
+
+#: CLI default: a persistent dev file, not the config sample's ``:memory:``.
+_DEFAULT_SQLITE_PATH = "sentinel.sqlite3"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,30 +39,93 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=False)
 
-    replay = subparsers.add_parser(
-        "replay", help="print a captured session as a human-readable trace"
-    )
+    replay = subparsers.add_parser("replay", help="print a captured session from the event store")
     replay.add_argument("session_id", help="the session ID to replay")
-    replay.add_argument(
-        "--store",
-        default="sentinel.sqlite3",
-        help="path to the SQLite event store (default: sentinel.sqlite3)",
-    )
+    _add_store_arg(replay)
+    _add_output_arg(replay)
     replay.set_defaults(func=_cmd_replay)
+
+    sessions = subparsers.add_parser("sessions", help="query captured sessions")
+    sessions_sub = sessions.add_subparsers(dest="sub", required=True)
+    listing = sessions_sub.add_parser("list", help="list sessions (newest first)")
+    listing.add_argument("--agent", help="only sessions for this agent_id")
+    listing.add_argument("--since", help="only sessions started at/after ISO timestamp")
+    listing.add_argument("--until", help="only sessions started at/before ISO timestamp")
+    listing.add_argument("--flagged", action="store_true", help="only sessions with flags")
+    listing.add_argument("--limit", type=int, default=100, help="max rows (default: 100)")
+    listing.add_argument("--offset", type=int, default=0, help="first row to return")
+    _add_store_arg(listing)
+    _add_output_arg(listing)
+    listing.set_defaults(func=_cmd_sessions_list)
+
+    health = subparsers.add_parser("health", help="report store health (S2-T11)")
+    _add_store_arg(health)
+    _add_output_arg(health)
+    health.set_defaults(func=_cmd_health)
 
     return parser
 
 
-async def _replay_events(store_path: str, session_id: str) -> int:
-    store = SQLiteEventStore(store_path)
+def _add_store_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dsn",
+        help=(
+            "store DSN (postgresql://..., sqlite:///...); defaults to the dev "
+            f"SQLite file `{_DEFAULT_SQLITE_PATH}`"
+        ),
+    )
+
+
+def _add_output_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--json", action="store_true", help="emit JSON (one doc per entity)")
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="JSON pretty-printed with two-space indent (implies --json)",
+    )
+
+
+async def _open_store(dsn: str | None) -> EventStore:
+    if dsn is None:
+        return SQLiteEventStore(_DEFAULT_SQLITE_PATH)
+    return build_store(dsn)
+
+
+def _emit_json(args: argparse.Namespace, value: object) -> None:
+    print(
+        json.dumps(_jsonable(value), indent=2 if args.pretty else None, default=str, sort_keys=True)
+    )
+
+
+def _jsonable(value: object) -> object:
+    """Walk dataclasses (result types) and containers to JSON-able objects."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _jsonable(getattr(value, field.name)) for field in dataclasses.fields(value)
+        }
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+async def _run_replay(args: argparse.Namespace) -> int:
+    store = await _open_store(args.dsn)
     try:
-        events = await store.get_session(session_id)
+        events = await store.get_session(args.session_id)
     finally:
         await store.close()
     if not events:
-        print(f"No events found for session {session_id} in {store_path}", file=sys.stderr)
+        if args.json or args.pretty:
+            _emit_json(args, {"error": f"session {args.session_id} not found"})
+        else:
+            print(f"No events found for session {args.session_id}", file=sys.stderr)
         return 1
-    print(f"Session {session_id} — {len(events)} events")
+    if args.json or args.pretty:
+        _emit_json(args, [e.model_dump(mode="json") for e in events])
+        return 0
+    print(f"Session {args.session_id} - {len(events)} events")
     for event in events:
         summary = json.dumps(event.payload, sort_keys=True, separators=(",", ":"))
         if len(summary) > 120:
@@ -65,8 +136,71 @@ async def _replay_events(store_path: str, session_id: str) -> int:
     return 0
 
 
+def _cmd_sessions_list(args: argparse.Namespace) -> int:
+    return int(asyncio.run(_run_sessions_list(args)))
+
+
+def _cmd_health(args: argparse.Namespace) -> int:
+    return int(asyncio.run(_run_health(args)))
+
+
 def _cmd_replay(args: argparse.Namespace) -> int:
-    return asyncio.run(_replay_events(args.store, args.session_id))
+    return int(asyncio.run(_run_replay(args)))
+
+
+async def _run_sessions_list(args: argparse.Namespace) -> int:
+    since = _parse_ts(args.since)
+    until = _parse_ts(args.until)
+    if (args.since and since is None) or (args.until and until is None):
+        print("--since/--until must be ISO timestamps", file=sys.stderr)
+        return 2
+    store = await _open_store(args.dsn)
+    try:
+        rows = await store.list_sessions(
+            agent_id=args.agent,
+            since=since,
+            until=until,
+            has_flags=args.flagged,
+            limit=args.limit,
+            offset=args.offset,
+        )
+    finally:
+        await store.close()
+    _emit_json(args, [_jsonable(r) for r in rows])
+    print(f"{len(rows)} session(s)")
+    for row in rows:
+        print(
+            f"  {row.session_id}  agent={row.agent_id or '-'}  {row.status}  "
+            f"started={row.started_at.isoformat()}  events={row.event_count}  "
+            f"flags={'yes' if row.has_flags else 'no'}"
+        )
+    return 0
+
+
+async def _run_health(args: argparse.Namespace) -> int:
+    store = await _open_store(args.dsn)
+    try:
+        health = await store.health()
+    finally:
+        await store.close()
+    _emit_json(args, _jsonable(health))
+    print(
+        f"sessions={health.sessions} events={health.events} flags={health.flags} "
+        f"tombstones={health.tombstones}"
+    )
+    if health.oldest_event is not None and health.newest_event is not None:
+        print(f"span={health.oldest_event.isoformat()} -> {health.newest_event.isoformat()}")
+    print(f"gaps: {health.gap_count} missing seqs across {health.sessions_with_gaps} session(s)")
+    return 0
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def main(argv: list[str] | None = None) -> int:
