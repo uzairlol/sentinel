@@ -328,18 +328,38 @@ class Value:
             return False
         return not (high is not None and self.number > high)
 
+    def render(self) -> str:
+        """The value as a person would read it, for evidence and details.
+
+        Not the dataclass repr: a flag's ``observed_value`` is quoted to a
+        reviewer, and ``"49usd num=49 unit=usd"`` is not what the tool said.
+        """
+        if self.kind is ValueKind.MEMBER and self.members:
+            body = ", ".join(self.members)
+        elif self.number is not None:
+            number = _render_number(self.number)
+            body = f"{number} {self.unit}".strip() if self.unit else number
+        else:
+            body = self.canonical or self.raw
+        return f"not {body}" if self.negated and body else body
+
+    def token(self) -> str:
+        """The shortest unambiguous form of this value.
+
+        Used to find the evidence note that carries it: a tool said
+        ``"Plan pro costs $49 per month"`` and folds no unit alias, so matching
+        on the rendered ``"49 usd"`` would miss the very line that refutes the
+        claim.
+        """
+        if self.kind is ValueKind.MEMBER and self.members:
+            return "|".join(self.members)
+        if self.number is not None:
+            return _render_number(self.number)
+        return self.canonical
+
     def __str__(self) -> str:
         """Render the value for a flag's ``details`` (debug-friendly)."""
-        parts = [self.canonical]
-        if self.number is not None:
-            parts.append(f"num={self.number}")
-        if self.unit:
-            parts.append(f"unit={self.unit}")
-        if self.members:
-            parts.append("members=" + "|".join(self.members))
-        if self.negated:
-            parts.append("negated")
-        return " ".join(parts)
+        return self.render()
 
 
 @dataclass(frozen=True)
@@ -1120,6 +1140,11 @@ class DiffResult:
     detail: str = ""
     cited: bool = False
     matched_value: str = ""
+    #: The shortest token that identifies what the evidence said (``"49"``, or a
+    #: member list). ``matched_value`` is the human phrasing; this is what
+    #: evidence notes are matched against, because a note never spells out the
+    #: unit alias the canonical form folds to.
+    observed: str = ""
 
     @property
     def is_grounded(self) -> bool:
@@ -1188,6 +1213,7 @@ def diff_claim(claim: Claim, context: DiffContext) -> DiffResult:
             detail=f"cited evidence contains {value.canonical}",
             cited=True,
             matched_value=hit,
+            observed=hit,
         )
     if context.has_evidence:
         hit = _explicit_match(value, context_values, context.context)
@@ -1197,6 +1223,7 @@ def diff_claim(claim: Claim, context: DiffContext) -> DiffResult:
                 support_kind=SupportKind.EXPLICIT,
                 detail=f"available tool output contains {value.canonical}",
                 matched_value=hit,
+                observed=hit,
             )
 
     # 2. implicit lexicon support
@@ -1207,6 +1234,7 @@ def diff_claim(claim: Claim, context: DiffContext) -> DiffResult:
             support_kind=SupportKind.IMPLICIT,
             detail=implied[1],
             matched_value=implied[0],
+            observed=implied[0],
         )
 
     # 3. implication: units, rounding, subset, bounds
@@ -1296,7 +1324,7 @@ def _explicit_match(
             # the implication rule, so the audit trail says the evidence said
             # milliseconds when the claim said minutes.
             if claim_value.number == value.number and claim_value.unit == value.unit:
-                return str(value)
+                return value.token()
             if claim_value.canonical == value.canonical:
                 return value.canonical
     return None
@@ -1343,7 +1371,8 @@ def _implication(
                     verdict=Verdict.IMPLIED,
                     support_kind=SupportKind.SUBSET,
                     detail=(f"claimed set is a subset of {value.canonical or 'the available set'}"),
-                    matched_value=value.raw,
+                    matched_value=value.render(),
+                    observed=value.token(),
                 )
         return None
 
@@ -1359,7 +1388,8 @@ def _implication(
                 verdict=Verdict.IMPLIED,
                 support_kind=SupportKind.UNIT_CONVERSION,
                 detail=f"{claim_value.canonical} equals {value.canonical} after unit conversion",
-                matched_value=str(value),
+                matched_value=value.render(),
+                observed=value.token(),
             )
         if (
             claim_value.unit is None
@@ -1370,7 +1400,8 @@ def _implication(
                 verdict=Verdict.IMPLIED,
                 support_kind=SupportKind.UNIT_CONVERSION,
                 detail=f"unqualified number matches {value.canonical}",
-                matched_value=str(value),
+                matched_value=value.render(),
+                observed=value.token(),
             )
         if (
             claim_value.unit in _DURATION_TO_MS
@@ -1384,7 +1415,8 @@ def _implication(
                     f"{claim_value.canonical} equals {value.number} once converted to "
                     f"{claim_value.unit}"
                 ),
-                matched_value=str(value),
+                matched_value=value.render(),
+                observed=value.token(),
             )
         if _is_rounding_of(claim_value, value):
             return DiffResult(
@@ -1392,7 +1424,8 @@ def _implication(
                 support_kind=SupportKind.ROUNDING,
                 detail=f"{claim_value.number} is {claim_value.canonical}, a rounded form of "
                 f"{value.number}",
-                matched_value=str(value),
+                matched_value=value.render(),
+                observed=value.token(),
             )
 
     # bounds
@@ -1436,6 +1469,14 @@ def _decimals(raw: str) -> int:
     """How many decimal places a written number committed to."""
     _, _, fraction = (raw or "").partition(".")
     return len(fraction) if fraction.isdigit() else 0
+
+
+def _render_number(number: Decimal) -> str:
+    """A Decimal as written: no exponent, no trailing zeros it never had."""
+    text = format(number, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
 
 
 def _bounds(texts: Sequence[str]) -> tuple[Decimal | None, Decimal | None] | None:
@@ -1585,7 +1626,8 @@ def _numeric_disagreement(
                     f"subject, the claim says {value.number}{value.unit or ''}"
                 ),
                 cited=bool(context.explicit),
-                matched_value=str(candidate),
+                matched_value=candidate.render(),
+                observed=candidate.token(),
             )
     return None
 
@@ -1619,6 +1661,8 @@ def _contradiction(
                         f"evidence offers {sorted(offered)}, the claim asserts {sorted(claimed)}"
                     ),
                     cited=bool(context.explicit),
+                    matched_value=candidate.render(),
+                    observed=candidate.token(),
                 )
 
     # 2. bound violation: a bounded number outside the range
@@ -1631,6 +1675,8 @@ def _contradiction(
                 support_kind=SupportKind.BOUND,
                 detail=f"{value.number} is outside the stated range [{low}, {high}]",
                 cited=bool(context.explicit),
+                matched_value=_range_text(low, high),
+                observed=_range_text(low, high),
             )
 
         # 2b. same-subject disagreement: the classic wrong-price finding.
@@ -1658,6 +1704,8 @@ def _contradiction(
             support_kind=SupportKind.DISAGREEMENT,
             detail=f"evidence says {candidate.canonical}, the claim says {value.canonical}",
             cited=bool(context.explicit),
+            matched_value=candidate.render(),
+            observed=candidate.token(),
         )
 
     # 4. negation: the evidence denies what the claim asserts (and vice versa)
@@ -1671,6 +1719,8 @@ def _contradiction(
                     support_kind=SupportKind.NEGATION,
                     detail="evidence states the opposite of the claim",
                     cited=bool(context.explicit),
+                    matched_value=candidate.render(),
+                    observed=candidate.token(),
                 )
 
     # 5. explicit exclusion phrasing about the claimed value
@@ -1685,8 +1735,21 @@ def _contradiction(
                     support_kind=SupportKind.EXCLUSION,
                     detail="evidence excludes the claimed value",
                     cited=bool(context.explicit),
+                    matched_value=value.render(),
+                    observed=value.token(),
                 )
     return None
+
+
+def _range_text(low: Decimal | None, high: Decimal | None) -> str:
+    """A bound as the evidence wrote it, for the flag's ``observed_value``."""
+    if low is not None and high is not None:
+        return f"{_render_number(low)} to {_render_number(high)}"
+    if low is not None:
+        return f"at least {_render_number(low)}"
+    if high is not None:
+        return f"at most {_render_number(high)}"
+    return ""
 
 
 # ---------------------------------------------------------------------------

@@ -112,7 +112,61 @@ class TestFlagShape:
     async def test_a_contradiction_outranks_an_ungrounded_claim(self) -> None:
         """Money first: the corpus case that is wrong is also the one that hurts."""
         flags = await _flags("contradicted_price")
+        assert flags
         assert flags[0].severity in {"high", "critical"}
+
+
+class TestContradictionEvidence:
+    """S3-T8: a contradiction has to carry the value that refutes it."""
+
+    @pytest.mark.parametrize(
+        "case_id",
+        [
+            "contradicted_price",
+            "contradicted_weekday",
+            "contradicted_date",
+            "contradicted_bound_violation",
+            "contradicted_negation",
+            "contradicted_membership",
+            "contradicted_membership_extra",
+        ],
+    )
+    async def test_every_contradiction_names_what_it_saw(self, case_id: str) -> None:
+        flags = await _flags(case_id)
+        assert flags
+        assert flags[0].details["observed_value"]
+
+    @pytest.mark.parametrize(
+        "case_id",
+        [
+            "contradicted_price",
+            "contradicted_weekday",
+            "contradicted_date",
+            "contradicted_bound_violation",
+            "contradicted_negation",
+            "contradicted_membership",
+            "contradicted_membership_extra",
+        ],
+    )
+    async def test_the_refuting_ref_is_labelled_as_such(self, case_id: str) -> None:
+        """A reviewer must see the disagreement in the flag, not go find it."""
+        flags = await _flags(case_id)
+        assert flags
+        roles = {ref.role for ref in flags[0].evidence}
+        assert EvidenceRole.COUNTERVAILANCE in roles
+        assert EvidenceRole.CLAIM in roles
+
+    async def test_the_observed_value_is_readable_english(self) -> None:
+        """Not a dataclass repr: this string is quoted to a person."""
+        flags = await _flags("contradicted_price")
+        assert flags
+        assert flags[0].details["observed_value"] == "49 usd"
+
+    async def test_an_ungrounded_claim_names_no_observed_value(self) -> None:
+        """There is nothing observed to quote when the agent never looked."""
+        flags = await _flags("ungrounded_price_invented")
+        assert flags
+        assert "observed_value" not in flags[0].details
 
 
 class TestDeterminism:

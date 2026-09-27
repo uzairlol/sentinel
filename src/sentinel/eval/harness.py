@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 import structlog
 
 from sentinel.eval.fixtures.provenance_corpus import CORPUS, CorpusCase, ExpectedFinding
+from sentinel.eval.provenance import MODULE, MODULE_VERSION
 from sentinel.eval.provenance_core import (
     DiffContext,
     RuleBasedClaimExtractor,
@@ -127,6 +128,33 @@ class CorpusReport:
         return round(invented / produced, 4) if produced else 0.0
 
     @property
+    def confusion(self) -> dict[str, int]:
+        """The 2x2 matrix, counted by case: expected a flag, or expected silence."""
+        flagged = [outcome for outcome in self.outcomes if outcome.produced]
+        return {
+            "true_positives": sum(1 for outcome in flagged if outcome.expected),
+            "false_negatives": len(self.false_negatives),
+            "false_positives": len(self.false_positives),
+            "true_negatives": sum(
+                1 for outcome in self.outcomes if not outcome.expected and not outcome.produced
+            ),
+        }
+
+    @property
+    def precision(self) -> float:
+        """Flagged cases the corpus agreed should be flagged."""
+        cells = self.confusion
+        denominator = cells["true_positives"] + cells["false_positives"]
+        return round(cells["true_positives"] / denominator, 4) if denominator else 1.0
+
+    @property
+    def recall(self) -> float:
+        """Expected detections the module actually made."""
+        cells = self.confusion
+        denominator = cells["true_positives"] + cells["false_negatives"]
+        return round(cells["true_positives"] / denominator, 4) if denominator else 1.0
+
+    @property
     def passed(self) -> bool:
         """Whether the run satisfies the ``S3-T14`` gates."""
         return (
@@ -166,6 +194,9 @@ class CorpusReport:
             "false_negative_rate": self.false_negative_rate,
             "false_positive_rate": self.false_positive_rate,
             "claim_false_positive_rate": self.claim_false_positive_rate,
+            "precision": self.precision,
+            "recall": self.recall,
+            "confusion": self.confusion,
             "passed": self.passed,
             "gates": {
                 "max_false_negative_rate": MAX_FALSE_NEGATIVE_RATE,
@@ -191,19 +222,30 @@ class CorpusReport:
         return json.dumps(self.to_dict(), indent=indent, sort_keys=True)
 
     def render(self) -> str:
-        """A compact operator-facing table of the run."""
+        """An operator-facing confusion matrix plus the per-case failures."""
+        cells = self.confusion
         lines = [
             f"corpus: {self.total_cases} cases  module={self.module}@{self.module_version}",
-            f"  false negatives: {self.false_negative_rate:.2%} ({len(self.false_negatives)})",
-            f"  false positives: {self.false_positive_rate:.2%} ({len(self.false_positives)})",
-            f"  claim FP rate:   {self.claim_false_positive_rate:.2%}",
+            "confusion matrix (case level)",
+            f"  {'':<14}{'flagged':>6}{'silent':>8}",
+            f"  {'should flag':<14}{cells['true_positives']:>6}{cells['false_negatives']:>8}"
+            f"   <- recall {self.recall:.2%}",
+            f"  {'should be quiet':<14}{cells['false_positives']:>6}"
+            f"{cells['true_negatives']:>8}   <- precision {self.precision:.2%}",
+            "",
+            f"  false-negative rate: {self.false_negative_rate:.2%} "
+            f"(gate <= {MAX_FALSE_NEGATIVE_RATE:.0%})",
+            f"  false-positive rate: {self.false_positive_rate:.2%} "
+            f"(gate <= {MAX_FALSE_POSITIVE_RATE:.0%})",
+            f"  claim FP rate:       {self.claim_false_positive_rate:.2%} "
+            f"(gate <= {MAX_CLAIM_FP_RATE:.0%})",
         ]
         for outcome in self.outcomes:
             if outcome.passed:
                 continue
             lines.append(f"  FAIL {outcome.case_id}")
-        lines.extend(f"    missing: {missing}" for missing in outcome.missing)
-        lines.extend(f"    spurious: {spurious}" for spurious in outcome.spurious)
+            lines.extend(f"    missing: {missing}" for missing in outcome.missing)
+            lines.extend(f"    spurious: {spurious}" for spurious in outcome.spurious)
         lines.append("PASS" if self.passed else "FAIL")
         return "\n".join(lines)
 
@@ -276,6 +318,22 @@ def run_corpus(
             failures=report.failures,
         )
     return report
+
+
+#: Modules ``sentinel eval-fixtures --module`` can run: short name -> module id.
+CORPUS_MODULES: dict[str, str] = {"provenance": MODULE}
+
+
+def run_module_corpus(module: str) -> CorpusReport:
+    """Run the corpus behind a module short name (``provenance``).
+
+    The module identity comes from the module itself rather than a literal
+    here, so a report can never claim to have tested a version the module did
+    not ship.
+    """
+    if module not in CORPUS_MODULES:
+        raise KeyError(module)
+    return run_corpus(module=MODULE, module_version=MODULE_VERSION)
 
 
 def _view_for(events: Sequence[Event]) -> SessionView:

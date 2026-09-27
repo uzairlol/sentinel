@@ -25,6 +25,7 @@ version produce byte-identical rows (``S3-T4``).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -176,6 +177,10 @@ class ClaimFinding:
             "support_kind": str(self.diff.support_kind),
             "detail": self.diff.detail,
         }
+        if self.diff.matched_value:
+            # S3-T8: a contradiction has to carry the value that refutes it,
+            # otherwise the reviewer has to go and re-derive it by hand.
+            details["observed_value"] = self.diff.matched_value
         if self.review_url:
             # A review link is deployment-shaped, so it rides in details rather
             # than the universal schema (docs/adr/0012-flag-schema.md).
@@ -452,16 +457,48 @@ def _flag_evidence(
         note=_quote(response_text_of(response)),
     )
     evidence = [claim_ref, *refs]
-    if diff.verdict is Verdict.CONFLICTED and diff.matched_value:
-        wanted = normalize_text(diff.matched_value.split("|")[0])
-        upgraded: list[EvidenceRef] = []
-        for ref in refs:
-            if wanted and wanted in normalize_text(ref.note or ""):
-                upgraded.append(ref.model_copy(update={"role": EvidenceRole.COUNTERVAILANCE}))
-            else:
-                upgraded.append(ref)
-        evidence = [claim_ref, *upgraded]
-    return tuple(evidence[: MAX_EVIDENCE_RESULTS + 1])
+    if diff.verdict is not Verdict.CONFLICTED:
+        return tuple(evidence[: MAX_EVIDENCE_RESULTS + 1])
+    wanted = _tokens(diff.observed or diff.matched_value)
+    return tuple(
+        [claim_ref]
+        + [
+            # The ref that carries the refuting value is promoted, so the
+            # reviewer sees the disagreement in the flag rather than in the log.
+            ref.model_copy(update={"role": EvidenceRole.COUNTERVAILANCE})
+            if any(token in _squash(ref.note or "") for token in wanted)
+            else ref
+            for ref in refs
+        ]
+    )[: MAX_EVIDENCE_RESULTS + 1]
+
+
+def _squash(text: str) -> str:
+    """Letters and digits only, so ``"49 usd"`` matches ``costs $49/month``."""
+    return re.sub(r"[^a-z0-9]", "", normalize_text(text))
+
+
+#: Separators a canonical value uses to hold several things at once.
+_TOKEN_SPLIT = re.compile(r"[|,]|\band\b|\bor\b")
+
+#: Conjunctions carry no evidence, so a note that merely says "or" is not the
+#: line that refutes anything.
+_TOKEN_STOPWORDS = frozenset({"and", "or"})
+
+
+def _tokens(observed: str) -> tuple[str, ...]:
+    """The pieces of an observed value worth looking for in a note.
+
+    A set is stored joined (``"card|wire"``) and a boolean as
+    ``"cancellations|false"``; neither appears verbatim in prose, so each part
+    is looked for on its own.
+    """
+    parts = (part.strip().casefold() for part in _TOKEN_SPLIT.split(observed))
+    return tuple(
+        token
+        for token in (_squash(part) for part in parts if part)
+        if token and token not in _TOKEN_STOPWORDS
+    )
 
 
 def _result_text(result: Event) -> str:

@@ -6,6 +6,9 @@ module is not part of the public API surface (docs/adr/0009).
 Sprint ``S0`` adds ``sentinel replay <session_id>``; Sprint ``S2`` (``S2-T10``)
 adds ``--json``/``--pretty`` output, cross-store ``--dsn`` selection, the
 ``sessions list`` query surface (``S2-T9``) and ``store health`` (``S2-T11``).
+Sprint ``S3`` adds ``sentinel eval-fixtures --module provenance`` (``S3-T13``),
+which runs a module over its adversarial corpus and prints the confusion matrix
+with the gate verdict. Exit code 1 means the gate failed, so CI can just read it.
 """
 
 from __future__ import annotations
@@ -62,6 +65,18 @@ def build_parser() -> argparse.ArgumentParser:
     _add_store_arg(health)
     _add_output_arg(health)
     health.set_defaults(func=_cmd_health)
+
+    fixtures = subparsers.add_parser(
+        "eval-fixtures",
+        help="run an evaluation module over its adversarial corpus (S3-T13)",
+    )
+    fixtures.add_argument(
+        "--module",
+        required=True,
+        help="module short name, e.g. provenance",
+    )
+    _add_output_arg(fixtures)
+    fixtures.set_defaults(func=_cmd_eval_fixtures)
 
     return parser
 
@@ -146,6 +161,28 @@ def _cmd_health(args: argparse.Namespace) -> int:
 
 def _cmd_replay(args: argparse.Namespace) -> int:
     return int(asyncio.run(_run_replay(args)))
+
+
+def _cmd_eval_fixtures(args: argparse.Namespace) -> int:
+    """``sentinel eval-fixtures --module provenance`` (S3-T13).
+
+    No store is involved: the corpus *is* the event sequence, so this runs
+    anywhere, including in CI without a database.
+    """
+    from sentinel.eval.harness import CORPUS_MODULES, run_module_corpus
+
+    if args.module not in CORPUS_MODULES:
+        print(
+            f"Unknown module {args.module!r}; known modules: {', '.join(sorted(CORPUS_MODULES))}",
+            file=sys.stderr,
+        )
+        return 2
+    report = run_module_corpus(args.module)
+    if args.json or args.pretty:
+        _emit_json(args, report.to_dict())
+    else:
+        print(report.render())
+    return 0 if report.passed else 1
 
 
 async def _run_sessions_list(args: argparse.Namespace) -> int:
