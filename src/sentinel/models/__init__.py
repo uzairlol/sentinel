@@ -1,4 +1,4 @@
-"""Event and flag schemas: ``Event``, its factory, the taxonomy, and RefLink."""
+"""Event and flag schemas: ``Event``/``RefLink`` (S0/S1) and ``Flag`` (``S3``)."""
 
 from __future__ import annotations
 
@@ -21,12 +21,24 @@ from sentinel.models.events import (
     RefLink,
     new_event_id,
 )
+from sentinel.models.flags import (
+    FLAG_SCHEMA_VERSION,
+    Adjudication,
+    EvidenceRef,
+    EvidenceRole,
+    Flag,
+    Severity,
+    flag_identity,
+    known_categories,
+    register_category,
+)
 
 __all__ = [
     "AGENT_STEP",
     "CAPTURE_DROPPED",
     "ERROR",
     "EVENT_TYPES",
+    "FLAG_SCHEMA_VERSION",
     "LLM_REQUEST",
     "LLM_RESPONSE",
     "MEMORY_READ",
@@ -36,8 +48,16 @@ __all__ = [
     "SESSION_START",
     "TOOL_CALL",
     "TOOL_RESULT",
+    "Adjudication",
     "Event",
+    "EvidenceRef",
+    "EvidenceRole",
+    "Flag",
     "RefKind",
     "RefLink",
+    "Severity",
+    "flag_identity",
+    "known_categories",
     "new_event_id",
+    "register_category",
 ]

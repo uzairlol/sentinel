@@ -22,7 +22,7 @@ import asyncio
 import hashlib
 import json
 import sqlite3
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -34,6 +34,7 @@ from sentinel.models.events import (
     Event,
     RefKind,
 )
+from sentinel.models.flags import Adjudication, EvidenceRef, Flag, Severity
 from sentinel.store.errors import RefIntegrityError
 from sentinel.store.gaps import SeqGap, seq_gaps
 from sentinel.store.protocol import EventStore
@@ -88,11 +89,14 @@ CREATE TABLE IF NOT EXISTS flags (
     confidence     REAL NOT NULL,
     summary        TEXT NOT NULL,
     evidence       TEXT NOT NULL DEFAULT '[]',
+    details        TEXT NOT NULL DEFAULT '{}',
+    review_only    INTEGER NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL,
     adjudication   TEXT NOT NULL DEFAULT 'pending',
     adjudicated_by TEXT,
     adjudicated_at TEXT,
-    auto_resolved  INTEGER
+    auto_resolved  INTEGER,
+    schema_version TEXT NOT NULL DEFAULT '0.1'
 );
 CREATE INDEX IF NOT EXISTS idx_flags_severity_created
     ON flags (severity, created_at);
@@ -111,6 +115,59 @@ CREATE TABLE IF NOT EXISTS tombstones (
 """
 
 _ROW_COLUMNS = ("event_id", "session_id", "seq", "ts", "type", "payload", "refs", "schema_version")
+
+_FLAG_COLUMNS = (
+    "flag_id",
+    "session_id",
+    "event_id",
+    "module",
+    "module_version",
+    "category",
+    "severity",
+    "confidence",
+    "summary",
+    "evidence",
+    "details",
+    "review_only",
+    "created_at",
+    "adjudication",
+    "adjudicated_by",
+    "adjudicated_at",
+    "auto_resolved",
+    "schema_version",
+)
+
+#: Columns added after ``S2`` (the ``S3`` flag schema, ADR-0012). A dev database
+#: created before ``S3`` is backfilled in place; production Postgres migrates
+#: through Alembic ``0002_flags_s3``.
+_FLAG_BACKFILL: dict[str, str] = {
+    "details": "TEXT NOT NULL DEFAULT '{}'",
+    "review_only": "INTEGER NOT NULL DEFAULT 0",
+    "schema_version": "TEXT NOT NULL DEFAULT '0.1'",
+}
+
+#: SQL ordering by severity rank, shared by every backend's flag query.
+SEVERITY_RANK_SQL = (
+    "CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 "
+    "WHEN 'low' THEN 1 ELSE 0 END"
+)
+
+#: Static statements for the flag table. ``INSERT OR IGNORE`` is the SQLite
+#: spelling of the Postgres store's ``ON CONFLICT DO NOTHING`` (ADR-0012).
+#: Written as literals (no caller value is ever interpolated) and kept in
+#: lock-step with ``_FLAG_COLUMNS`` by ``test_flag_statements_match_columns``.
+_FLAG_INSERT = (
+    "INSERT OR IGNORE INTO flags (flag_id, session_id, event_id, module, module_version, "
+    "category, severity, confidence, summary, evidence, details, review_only, created_at, "
+    "adjudication, adjudicated_by, adjudicated_at, auto_resolved, schema_version) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+_FLAG_SELECT = (
+    "SELECT flag_id, session_id, event_id, module, module_version, category, severity, "
+    "confidence, summary, evidence, details, review_only, created_at, adjudication, "
+    "adjudicated_by, adjudicated_at, auto_resolved, schema_version FROM flags"
+)
 
 #: Session lifecycle states, kept in lock-step with the ``flags`` severity set.
 _SESSION_ACTIVE = "active"
@@ -132,7 +189,26 @@ class SQLiteEventStore(EventStore):
             self._connection.row_factory = sqlite3.Row
             await self._connection.execute("PRAGMA foreign_keys = ON")
             await self._connection.executescript(_SCHEMA)
+            await self._backfill_flag_columns()
         return self._connection
+
+    async def _backfill_flag_columns(self) -> None:
+        """Add post-``S2`` flag columns to a pre-``S3`` dev database.
+
+        The dev store ships its schema with ``CREATE TABLE IF NOT EXISTS`` so a
+        file created during ``S2`` keeps working; new columns are added in
+        place. Production Postgres uses Alembic ``0002_flags_s3`` instead.
+        """
+        if self._connection is None:  # pragma: no cover - guarded by caller
+            return
+        cursor = await self._connection.execute("PRAGMA table_info(flags)")
+        present = {row["name"] for row in await cursor.fetchall()}
+        for column, ddl in _FLAG_BACKFILL.items():
+            if column not in present:
+                await self._connection.execute(
+                    f"ALTER TABLE flags ADD COLUMN {column} {ddl}"  # nosec B608
+                )
+        await self._connection.commit()
 
     # -- writes -----------------------------------------------------------
 
@@ -555,6 +631,105 @@ class SQLiteEventStore(EventStore):
                     last_ts = rows[-1]["ts"]
         return report
 
+    # -- evaluator flags (``S3-T1``) -------------------------------------
+
+    async def put_flag(self, flag: Flag) -> bool:
+        """Persist *flag*; ``True`` when newly written, ``False`` when known."""
+        return await self.put_flags([flag]) == 1
+
+    async def put_flags(self, flags: Sequence[Flag]) -> int:
+        """Persist *flags* in one transaction; returns the number of new rows.
+
+        Re-writing a known ``flag_id`` is a no-op: a repeat evaluator run never
+        duplicates a finding and never clobbers a human adjudication
+        (ADR-0012). The first writer of an id wins, so the stored row is a pure
+        function of the (deterministic) flag content.
+        """
+        if not flags:
+            return 0
+        conn = await self._conn()
+        values = [tuple(_flag_to_row(flag)[column] for column in _FLAG_COLUMNS) for flag in flags]
+        async with self._lock:
+            await conn.execute("BEGIN")
+            try:
+                cursor = await conn.executemany(_FLAG_INSERT, values)
+                written = int(cursor.rowcount or 0)
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+        return written
+
+    async def get_flags(
+        self,
+        *,
+        session_id: str | None = None,
+        module: str | None = None,
+        category: str | None = None,
+        min_severity: Severity | None = None,
+        min_confidence: float | None = None,
+        adjudication: Adjudication | None = None,
+        review_only: bool | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Flag]:
+        """Query flags newest-first, optionally filtered."""
+        conn = await self._conn()
+        where: list[str] = []
+        params: list[Any] = []
+        if session_id is not None:
+            where.append("session_id = ?")
+            params.append(session_id)
+        if module is not None:
+            where.append("module = ?")
+            params.append(module)
+        if category is not None:
+            where.append("category = ?")
+            params.append(category)
+        if min_severity is not None:
+            where.append(f"{SEVERITY_RANK_SQL} >= ?")
+            params.append(min_severity.rank)
+        if min_confidence is not None:
+            where.append("confidence >= ?")
+            params.append(min_confidence)
+        if adjudication is not None:
+            where.append("adjudication = ?")
+            params.append(adjudication.value)
+        if review_only is not None:
+            where.append("review_only = ?")
+            params.append(1 if review_only else 0)
+        # Every fragment below is a module-level constant and every value is
+        # bound; nothing from the caller is ever interpolated.
+        query = _FLAG_SELECT + ((" WHERE " + " AND ".join(where)) if where else "")
+        # newest-first, most severe first within the same instant, id as the
+        # tie-break so paging is stable and deterministic
+        query += " ORDER BY created_at DESC, " + SEVERITY_RANK_SQL + " DESC, flag_id ASC"
+        query += " LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        cursor = await conn.execute(query, params)
+        return [_row_to_flag(row) for row in await cursor.fetchall()]
+
+    async def adjudicate_flag(
+        self,
+        flag_id: str,
+        adjudication: Adjudication,
+        *,
+        adjudicated_by: str,
+        at: datetime | None = None,
+    ) -> bool:
+        """Record a human decision on *flag_id*; ``False`` when unknown."""
+        conn = await self._conn()
+        stamp = _ts_to_str(at or datetime.now(UTC))
+        async with self._lock:
+            cursor = await conn.execute(
+                "UPDATE flags SET adjudication = ?, adjudicated_by = ?, adjudicated_at = ? "
+                "WHERE flag_id = ?",
+                (adjudication.value, adjudicated_by, stamp, flag_id),
+            )
+            changed = cursor.rowcount
+            await conn.commit()
+        return changed > 0
+
     async def close(self) -> None:
         """Close the underlying connection and release the file handle."""
         if self._connection is not None:
@@ -563,6 +738,54 @@ class SQLiteEventStore(EventStore):
 
 
 # -- row mapping -----------------------------------------------------------
+
+
+def _flag_to_row(flag: Flag) -> dict[str, Any]:
+    """Flatten a :class:`Flag` into the ``flags`` table's column shape."""
+    return {
+        "flag_id": flag.flag_id,
+        "session_id": flag.session_id,
+        "event_id": flag.event_id,
+        "module": flag.module,
+        "module_version": flag.module_version,
+        "category": flag.category,
+        "severity": flag.severity.value,
+        "confidence": flag.confidence,
+        "summary": flag.summary,
+        "evidence": json.dumps([ref.to_row() for ref in flag.evidence]),
+        "details": json.dumps(flag.details, sort_keys=True, default=str),
+        "review_only": 1 if flag.review_only else 0,
+        "created_at": _ts_to_str(flag.created_at),
+        "adjudication": flag.adjudication.value,
+        "adjudicated_by": flag.adjudicated_by,
+        "adjudicated_at": _ts_to_str(flag.adjudicated_at) if flag.adjudicated_at else None,
+        "auto_resolved": None if flag.auto_resolved is None else int(flag.auto_resolved),
+        "schema_version": flag.schema_version,
+    }
+
+
+def _row_to_flag(row: sqlite3.Row) -> Flag:
+    raw = dict(row)
+    return Flag(
+        flag_id=raw["flag_id"],
+        session_id=raw["session_id"],
+        event_id=raw["event_id"],
+        module=raw["module"],
+        module_version=raw["module_version"],
+        category=raw["category"],
+        severity=Severity(raw["severity"]),
+        confidence=float(raw["confidence"]),
+        summary=raw["summary"],
+        evidence=[EvidenceRef.from_row(item) for item in json.loads(raw["evidence"])],
+        details=json.loads(raw["details"] or "{}"),
+        review_only=bool(raw["review_only"]),
+        created_at=_parse_ts(raw["created_at"]),
+        adjudication=Adjudication(raw["adjudication"]),
+        adjudicated_by=raw["adjudicated_by"],
+        adjudicated_at=_parse_ts(raw["adjudicated_at"]) if raw["adjudicated_at"] else None,
+        auto_resolved=None if raw["auto_resolved"] is None else bool(raw["auto_resolved"]),
+        schema_version=raw["schema_version"],
+    )
 
 
 def _row_to_event(row: sqlite3.Row) -> Event:

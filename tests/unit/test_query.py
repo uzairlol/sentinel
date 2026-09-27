@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import datetime
 import importlib.util
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
@@ -28,6 +29,7 @@ from sentinel.models.events import (
     RefLink,
     new_event_id,
 )
+from sentinel.models.flags import Adjudication, Flag
 from sentinel.store.gaps import SeqGap
 from sentinel.store.reporting import CallEdge, SessionSummary, StoreHealth
 from sentinel.store.retention import PruneReport, RetentionPolicy
@@ -222,6 +224,27 @@ async def test_dangling_ref_is_dropped_not_raised(events_store: SQLiteEventStore
 
         async def prune(self, policy: RetentionPolicy) -> PruneReport:
             return await self.store.prune(policy)
+
+        async def put_flag(self, flag: Flag) -> bool:
+            return await self.store.put_flag(flag)
+
+        async def put_flags(self, flags: Sequence[Flag]) -> int:
+            return await self.store.put_flags(flags)
+
+        async def get_flags(self, **kwargs: Any) -> list[Flag]:
+            return await self.store.get_flags(**kwargs)
+
+        async def adjudicate_flag(
+            self,
+            flag_id: str,
+            adjudication: Adjudication,
+            *,
+            adjudicated_by: str,
+            at: datetime.datetime | None = None,
+        ) -> bool:
+            return await self.store.adjudicate_flag(
+                flag_id, adjudication, adjudicated_by=adjudicated_by, at=at
+            )
 
         async def close(self) -> None:
             await self.store.close()

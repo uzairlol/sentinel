@@ -26,9 +26,9 @@ import asyncio
 import hashlib
 import logging
 import random
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from sentinel.models.events import (
@@ -38,6 +38,7 @@ from sentinel.models.events import (
     RefKind,
     RefLink,
 )
+from sentinel.models.flags import Adjudication, EvidenceRef, Flag, Severity
 from sentinel.store.errors import RefIntegrityError
 from sentinel.store.gaps import SeqGap, seq_gaps
 from sentinel.store.protocol import EventStore
@@ -82,7 +83,7 @@ class PostgresEventStore(EventStore):
         :class:`RefIntegrityError` or SQL integrity violation is never retried.
         """
         try:
-            from sqlalchemy import delete, func, insert, select, text, update
+            from sqlalchemy import case, delete, func, insert, select, text, update
             from sqlalchemy.dialects.postgresql import insert as pg_insert
             from sqlalchemy.ext.asyncio import (
                 AsyncEngine,
@@ -102,6 +103,7 @@ class PostgresEventStore(EventStore):
         self._delete = delete
         self._func = func
         self._text = text
+        self._case = case
         self._pg_insert = pg_insert
         self._AsyncEngine: type[AsyncEngine] = AsyncEngine
         self._AsyncSession: type[AsyncSession] = AsyncSession
@@ -655,6 +657,143 @@ class PostgresEventStore(EventStore):
                 await session.commit()
         return report
 
+    # -- evaluator flags (``S3-T1``) -------------------------------------
+
+    async def put_flag(self, flag: Flag) -> bool:
+        """Persist *flag*; ``True`` when newly written, ``False`` when known."""
+        return await self.put_flags([flag]) == 1
+
+    async def put_flags(self, flags: Sequence[Flag]) -> int:
+        """Persist *flags* in one transaction; returns the number of new rows.
+
+        Mirrors the SQLite store exactly: idempotent by ``flag_id`` with the
+        first writer winning, so a repeat evaluator run never duplicates a
+        finding and never clobbers a human adjudication (ADR-0012).
+        """
+        if not flags:
+            return 0
+        models = self._models
+        FlagRecord = models.FlagRecord
+        rows = [
+            {
+                "flag_id": flag.flag_id,
+                "session_id": flag.session_id,
+                "event_id": flag.event_id,
+                "module": flag.module,
+                "module_version": flag.module_version,
+                "category": flag.category,
+                "severity": flag.severity.value,
+                "confidence": flag.confidence,
+                "summary": flag.summary,
+                "evidence": [ref.to_row() for ref in flag.evidence],
+                "details": flag.details,
+                "review_only": flag.review_only,
+                "created_at": flag.created_at,
+                "adjudication": flag.adjudication.value,
+                "adjudicated_by": flag.adjudicated_by,
+                "adjudicated_at": flag.adjudicated_at,
+                "auto_resolved": flag.auto_resolved,
+                "schema_version": flag.schema_version,
+            }
+            for flag in flags
+        ]
+
+        async def op() -> int:
+            written = 0
+            async with await self._session() as session:
+                for chunk in _chunks(rows, 500):
+                    result = await session.execute(
+                        self._pg_insert(FlagRecord)
+                        .values(chunk)
+                        .on_conflict_do_nothing(index_elements=[FlagRecord.flag_id])
+                    )
+                    written += int(result.rowcount or 0)
+                await session.commit()
+            return written
+
+        return cast(int, await self._exec_with_retry(op))
+
+    async def get_flags(
+        self,
+        *,
+        session_id: str | None = None,
+        module: str | None = None,
+        category: str | None = None,
+        min_severity: Severity | None = None,
+        min_confidence: float | None = None,
+        adjudication: Adjudication | None = None,
+        review_only: bool | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Flag]:
+        """Query flags newest-first, optionally filtered (gate + review reads)."""
+        models = self._models
+        FlagRecord = models.FlagRecord
+        # Rank severity in SQL so the gate can filter/order on it. Equivalent to
+        # the SQLite store's SEVERITY_RANK_SQL, expressed as a typed CASE so
+        # SQLAlchemy knows it is an integer expression rather than a literal.
+        rank = self._case(
+            (FlagRecord.severity == "critical", 4),
+            (FlagRecord.severity == "high", 3),
+            (FlagRecord.severity == "medium", 2),
+            (FlagRecord.severity == "low", 1),
+            else_=0,
+        )
+        stmt = self._select(FlagRecord)
+        if session_id is not None:
+            stmt = stmt.where(FlagRecord.session_id == session_id)
+        if module is not None:
+            stmt = stmt.where(FlagRecord.module == module)
+        if category is not None:
+            stmt = stmt.where(FlagRecord.category == category)
+        if min_severity is not None:
+            stmt = stmt.where(rank >= min_severity.rank)
+        if min_confidence is not None:
+            stmt = stmt.where(FlagRecord.confidence >= min_confidence)
+        if adjudication is not None:
+            stmt = stmt.where(FlagRecord.adjudication == adjudication.value)
+        if review_only is not None:
+            stmt = stmt.where(FlagRecord.review_only.is_(review_only))
+        stmt = stmt.order_by(FlagRecord.created_at.desc(), rank.desc(), FlagRecord.flag_id.asc())
+        stmt = stmt.limit(limit).offset(offset)
+        async with await self._session() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+        return [_record_to_flag(record) for record in rows]
+
+    async def adjudicate_flag(
+        self,
+        flag_id: str,
+        adjudication: Adjudication,
+        *,
+        adjudicated_by: str,
+        at: datetime | None = None,
+    ) -> bool:
+        """Record a human decision on *flag_id*; ``False`` when unknown.
+
+        Needs a credential with ``UPDATE`` on ``flags`` (the
+        ``sentinel_reviewer`` role) — the append-only writer credential is
+        rejected by Postgres (INV-2, ``S2-T3``).
+        """
+        models = self._models
+        FlagRecord = models.FlagRecord
+        stamp = _as_utc(at or datetime.now(UTC))
+
+        async def op() -> bool:
+            async with await self._session() as session:
+                result = await session.execute(
+                    self._update(FlagRecord)
+                    .where(FlagRecord.flag_id == flag_id)
+                    .values(
+                        adjudication=adjudication.value,
+                        adjudicated_by=adjudicated_by,
+                        adjudicated_at=stamp,
+                    )
+                )
+                await session.commit()
+                return bool(result.rowcount)
+
+        return cast(bool, await self._exec_with_retry(op))
+
     async def close(self) -> None:
         """Dispose the engine, releasing every pooled connection."""
         if self._engine is not None:
@@ -707,6 +846,30 @@ def _record_to_event(record: _Any, refs: list[RefLink]) -> Event:
         type=record.type,
         payload=dict(record.payload) if record.payload else {},
         refs=refs,
+        schema_version=record.schema_version,
+    )
+
+
+def _record_to_flag(record: _Any) -> Flag:
+    """Rebuild a :class:`Flag` from a ``flags`` row."""
+    return Flag(
+        flag_id=record.flag_id,
+        session_id=record.session_id,
+        event_id=record.event_id,
+        module=record.module,
+        module_version=record.module_version,
+        category=record.category,
+        severity=Severity(record.severity),
+        confidence=float(record.confidence),
+        summary=record.summary,
+        evidence=[EvidenceRef.from_row(item) for item in (record.evidence or [])],
+        details=dict(record.details or {}),
+        review_only=bool(record.review_only),
+        created_at=_as_utc(record.created_at),
+        adjudication=Adjudication(record.adjudication),
+        adjudicated_by=record.adjudicated_by,
+        adjudicated_at=_as_utc(record.adjudicated_at) if record.adjudicated_at else None,
+        auto_resolved=record.auto_resolved,
         schema_version=record.schema_version,
     )
 

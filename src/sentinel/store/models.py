@@ -9,13 +9,15 @@ Single source of truth for the schema that the Alembic migration
   the ``(session_id, seq)`` pair is unique (``S2-T4``).
 * ``event_refs`` — the normalised reference links (INV-3). Every row carries
   two foreign keys back to ``events``, so a link can never dangle.
-* ``flags`` — evaluator flags; the ``S3`` evaluators consume this table.
+* ``flags`` — evaluator flags, the universal finding shape every module
+  writes (``S3-T1``, docs/adr/0012).
 * ``schema_meta`` — schema-version bookkeeping (docs/adr/0007).
 * ``tombstones`` — audit records for retention deletions (INV-2): rows are
   never silently removed, they are tombstoned and then physically deleted.
 
-Constraints and indexes from ``S2-T4`` / ``S2-T5`` are declared here so
-``Base.metadata`` produced by the migration exactly matches the models.
+Constraints and indexes from ``S2-T4`` / ``S2-T5`` (plus the ``S3`` flag columns
+in migration ``0002_flags_s3``) are declared here so ``Base.metadata`` produced
+by the migrations exactly matches the models.
 """
 
 from __future__ import annotations
@@ -38,6 +40,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from sentinel.models.flags import FLAG_SCHEMA_VERSION
 
 #: ULIDs are 26-character Crockford base32 strings.
 ID_LENGTH = 26
@@ -121,7 +125,15 @@ class EventRefRecord(Base):
 
 
 class FlagRecord(Base):
-    """An evaluator flag (schema-forward compatible with the ``S3`` evaluators)."""
+    """An evaluator flag (the ``S3`` flag schema, docs/adr/0012).
+
+    Evaluator findings share this one shape, so the gate (``S7``) and the review
+    UI never branch on which module raised a flag. ``evidence`` holds the
+    event links that justify the finding (INV-3) and ``details`` the
+    module-specific structured payload (claimed vs observed values, thresholds).
+    ``review_only`` marks findings that must be adjudicated by a human before
+    they may gate (``S5-T10``).
+    """
 
     __tablename__ = "flags"
 
@@ -142,11 +154,18 @@ class FlagRecord(Base):
     evidence: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
+    details: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    review_only: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     adjudication: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
     adjudicated_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
     adjudicated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     auto_resolved: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    schema_version: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=FLAG_SCHEMA_VERSION
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -161,6 +180,8 @@ class FlagRecord(Base):
         #: The gate's ordering index (flag.severity, flag.created_at).
         Index("ix_flags_severity_created_at", "severity", "created_at"),
         Index("ix_flags_session_id", "session_id"),
+        #: The human-review queue reads pending flags newest-first (``S3-T15``).
+        Index("ix_flags_adjudication_created_at", "adjudication", "created_at"),
     )
 
 

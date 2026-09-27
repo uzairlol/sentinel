@@ -27,6 +27,7 @@ from sentinel.models.events import (
     RefLink,
     new_event_id,
 )
+from sentinel.models.flags import Adjudication, EvidenceRef, EvidenceRole, Flag, Severity
 from sentinel.store.errors import RefIntegrityError
 from sentinel.store.factory import build_store
 from sentinel.store.protocol import EventStore
@@ -330,3 +331,133 @@ async def test_disabled_policy_prunes_nothing(store: EventStore) -> None:
     report = await store.prune(RetentionPolicy())
     assert report.pruned_events == 0
     assert len(await store.get_session(session_id)) == 1
+
+
+# -- evaluator flags (``S3-T1``) -------------------------------------------
+
+
+def _flag(session_id: str, event_id: str, **overrides: object) -> Flag:
+    base: dict[str, object] = {
+        "session_id": session_id,
+        "module": "provenance",
+        "module_version": "0.1.0",
+        "category": "ungrounded_claim",
+        "confidence": 0.9,
+        "summary": "cites a tool that was never called",
+        "evidence": [EvidenceRef(event_id=event_id, role=EvidenceRole.CLAIM, seq=0)],
+        "created_at": datetime.now(UTC),
+        "dedupe_key": "k1",
+    }
+    base.update(overrides)
+    return Flag.create(**base)  # type: ignore[arg-type]
+
+
+async def test_flag_round_trip_and_idempotency(store: EventStore) -> None:
+    session_id = new_event_id()
+    event = _event(session_id, 0, type_=LLM_RESPONSE)
+    await store.append(event)
+    flag = _flag(session_id, event.event_id, details={"claimed": "42", "observed": None})
+
+    assert await store.put_flag(flag) is True
+    assert await store.put_flag(flag) is False
+    assert await store.put_flags([flag]) == 0
+
+    stored = await store.get_flags(session_id=session_id)
+    assert len(stored) == 1
+    assert stored[0] == flag
+
+
+async def test_flag_batch_and_query_filters(store: EventStore) -> None:
+    session_id = new_event_id()
+    event = _event(session_id, 0, type_=LLM_RESPONSE)
+    await store.append(event)
+    flags = [
+        _flag(
+            session_id,
+            event.event_id,
+            dedupe_key=f"k{i}",
+            severity=severity,
+            category=category,
+            confidence=confidence,
+            created_at=datetime.now(UTC) + timedelta(seconds=i),
+        )
+        for i, (severity, category, confidence) in enumerate(
+            [
+                (Severity.LOW, "ungrounded_claim", 0.5),
+                (Severity.CRITICAL, "contradicted_claim", 0.99),
+                (Severity.MEDIUM, "ungrounded_claim", 0.7),
+            ]
+        )
+    ]
+    assert await store.put_flags(flags) == 3
+    assert await store.put_flags(flags[:2]) == 0
+
+    everything = await store.get_flags(session_id=session_id)
+    assert len(everything) == 3
+    # newest first, and severity breaks ties on identical instants
+    assert [f.created_at for f in everything] == sorted(
+        (f.created_at for f in everything), reverse=True
+    )
+    assert len(await store.get_flags(min_severity=Severity.MEDIUM, session_id=session_id)) == 2
+    assert len(await store.get_flags(category="contradicted_claim")) == 1
+    assert len(await store.get_flags(module="provenance")) == 3
+    assert len(await store.get_flags(min_confidence=0.9)) == 1
+    assert len(await store.get_flags(limit=1)) == 1
+    assert await store.get_flags(session_id=new_event_id()) == []
+
+
+async def test_flag_review_only_filter_is_persisted(store: EventStore) -> None:
+    session_id = new_event_id()
+    event = _event(session_id, 0, type_=LLM_RESPONSE)
+    await store.append(event)
+    await store.put_flags(
+        [
+            _flag(session_id, event.event_id, dedupe_key="a", review_only=True),
+            _flag(session_id, event.event_id, dedupe_key="b", review_only=False),
+        ]
+    )
+    assert len(await store.get_flags(review_only=True)) == 1
+    assert len(await store.get_flags(review_only=False)) == 1
+
+
+async def test_adjudication_survives_an_evaluator_rerun(store: EventStore) -> None:
+    session_id = new_event_id()
+    event = _event(session_id, 0, type_=LLM_RESPONSE)
+    await store.append(event)
+    flag = _flag(session_id, event.event_id)
+    await store.put_flag(flag)
+
+    assert (
+        await store.adjudicate_flag(
+            flag.flag_id, Adjudication.CONFIRMED, adjudicated_by="reviewer@example"
+        )
+        is True
+    )
+    # re-running the evaluator must not resurrect the row as pending
+    assert await store.put_flag(flag) is False
+
+    confirmed = await store.get_flags(adjudication=Adjudication.CONFIRMED)
+    assert [f.flag_id for f in confirmed] == [flag.flag_id]
+    assert confirmed[0].adjudicated_by == "reviewer@example"
+    assert confirmed[0].adjudicated_at is not None
+    assert await store.get_flags(adjudication=Adjudication.REJECTED) == []
+
+
+async def test_adjudicating_an_unknown_flag_reports_false(store: EventStore) -> None:
+    assert (
+        await store.adjudicate_flag(
+            new_event_id(), Adjudication.REJECTED, adjudicated_by="reviewer@example"
+        )
+        is False
+    )
+
+
+async def test_flagged_session_appears_in_flag_filtered_listing(store: EventStore) -> None:
+    session_id = new_event_id()
+    event = _event(session_id, 0, type_=LLM_RESPONSE)
+    await store.append(event)
+    assert await store.list_sessions(has_flags=True) == []
+    await store.put_flag(_flag(session_id, event.event_id))
+    flagged = await store.list_sessions(has_flags=True)
+    assert [row.session_id for row in flagged] == [session_id]
+    assert flagged[0].has_flags is True
