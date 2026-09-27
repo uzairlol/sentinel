@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from sentinel.models.events import (
     AGENT_STEP,
@@ -24,6 +25,9 @@ from sentinel.models.events import (
     RefKind,
 )
 from sentinel.store.protocol import EventStore
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 logger = logging.getLogger("sentinel.query")
 
@@ -141,10 +145,21 @@ async def get_call_graph(store: EventStore, session_id: str) -> CallGraph:
     Never raises: a dangling ref (already prevented by INV-3) is dropped
     and logged rather than bubbling up into the caller.
     """
-    events = await store.get_session(session_id)
+    return build_call_graph(session_id, await store.get_session(session_id))
+
+
+def build_call_graph(session_id: str, events: Iterable[Event]) -> CallGraph:
+    """Resolve *events* into a :class:`CallGraph` without touching the store.
+
+    The pure half of :func:`get_call_graph`, so a caller that has already
+    loaded (or deliberately truncated) an event list does not have to read it
+    twice. Refs that point outside *events* are dropped and logged — a
+    truncated or mid-flight session simply has fewer edges.
+    """
     graph = CallGraph(session_id=session_id)
     for event in events:
         graph.nodes[event.event_id] = event
+    for event in events:
         for ref in event.refs:
             dst = graph.nodes.get(ref.event_id)
             if dst is None:
