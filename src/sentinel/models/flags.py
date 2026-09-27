@@ -33,7 +33,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from ulid import ULID
 
 #: The flag schema version emitted by this package (docs/adr/0007 analogue).
@@ -280,6 +280,25 @@ class Flag(BaseModel):
                 raise ValueError(f"duplicate evidence entry {key[0]}/{key[1].value}")
             seen.add(key)
         return value
+
+    @model_validator(mode="after")
+    def _require_adjudication_provenance(self) -> Flag:
+        """A decision without an author, or an author without a decision, is a lie.
+
+        The row has to be able to answer "who ruled on this, and when" without a
+        second lookup, because that answer is the point of keeping the flag
+        after the log it came from has been pruned.
+        """
+        decided = self.adjudication is not Adjudication.PENDING
+        attributed = self.adjudicated_by is not None or self.adjudicated_at is not None
+        if decided and not attributed:
+            raise ValueError(
+                f"adjudication={self.adjudication.value!r} requires adjudicated_by and "
+                "adjudicated_at"
+            )
+        if attributed and not decided:
+            raise ValueError("adjudicated_by/adjudicated_at require a non-pending adjudication")
+        return self
 
     @property
     def evidence_event_ids(self) -> list[str]:

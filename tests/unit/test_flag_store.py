@@ -280,6 +280,34 @@ async def test_adjudicate_records_supplied_instant() -> None:
     await store.close()
 
 
+async def test_a_second_reviewer_cannot_overwrite_the_first() -> None:
+    """First write wins: the flag keeps the decision that was actually made.
+
+    Two reviewers disagreeing is a normal event, not a reason to lose the first
+    ruling — and silently rewriting ``adjudicated_by`` would leave the row
+    claiming someone said something they did not (ADR-0012).
+    """
+    store, session_id = await _ready()
+    flag = _flag(session_id)
+    await store.put_flag(flag)
+    first = datetime(2026, 9, 28, 9, 30, tzinfo=UTC)
+    assert await store.adjudicate_flag(
+        flag.flag_id, Adjudication.CONFIRMED, adjudicated_by="carol", at=first
+    )
+    second = datetime(2026, 9, 29, 11, 0, tzinfo=UTC)
+    assert (
+        await store.adjudicate_flag(
+            flag.flag_id, Adjudication.REJECTED, adjudicated_by="dan", at=second
+        )
+        is False
+    )
+    stored = (await store.get_flags(session_id=session_id))[0]
+    assert stored.adjudication is Adjudication.CONFIRMED
+    assert stored.adjudicated_by == "carol"
+    assert stored.adjudicated_at == first
+    await store.close()
+
+
 async def test_flagged_events_survive_retention_prune() -> None:
     """Evidence referenced by a flag is never pruned (``S2-T12`` guarantee)."""
     store = SQLiteEventStore(":memory:")

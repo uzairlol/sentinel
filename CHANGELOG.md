@@ -5,6 +5,42 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Sprint `S3` — Tool-Use Grounding & Provenance. First evaluator module.
+
+### Added
+
+- Universal `Flag` row (ADR-0012): deterministic `flag_id` derived from
+  `(session_id, module, module_version, category, dedupe_key)`, typed
+  `evidence` refs (`claim` / `evidence` / `context` / `countervailance`),
+  severity, confidence, and adjudication provenance. Persisted in SQLite and
+  Postgres behind the `EventStore` protocol, with a `0002_flags_s3` migration and
+  a `sentinel_reviewer` role whose only mutation is adjudication.
+- `EvaluatorWorker` base: watermark/close triggers plus on-demand evaluation,
+  idempotent writes, bounded retries with jittered backoff, resumable
+  checkpoints, bounded `SessionView`, and call-graph context.
+- Claim extraction (`sentinel.eval.provenance_core`): rule/template classifier
+  with a pluggable model hook, a maintained deictic grounding lexicon, and
+  normalisation to `{claim_text, claimed_source, claimed_value}`.
+- `provenance_diff`: flags `ungrounded_claim` when no matching call exists and
+  `contradicted_claim` when the observed value refutes the claim, with the
+  observed value carried in the flag and its evidence marked `countervailance`.
+- Review routing (`S3-T15`): flags at or below the module's confidence
+  threshold are written `review_only` and queue for `S7` instead of gating.
+- 22-case adversarial corpus (`known-good` vs `known-bad`, replayable event
+  sequences) and the `sentinel eval-fixtures --module provenance` harness, which
+  prints a confusion matrix with case/claim FP and FN rates. **Measured: FP
+  0.00%, FN 0.00%** against budgets of ≤ 5% FP / ≤ 10% FN.
+- `sentinel.eval.provenance` reusable core, imported directly by `S4`.
+
+### Changed
+
+- The offline coverage gate no longer counts the Postgres store and its ORM
+  models, which only the Postgres integration job executes — matching the
+  existing treatment of the Postgres memory adapter. Every other module is
+  still held to ≥ 90%.
+
 ## [0.0.4] - 2026-09-24
 
 Sprint `S2` — Event Store Hardening & Query/Replay.

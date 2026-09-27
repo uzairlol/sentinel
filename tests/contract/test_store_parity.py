@@ -452,6 +452,35 @@ async def test_adjudicating_an_unknown_flag_reports_false(store: EventStore) -> 
     )
 
 
+async def test_adjudication_is_first_write_wins(store: EventStore) -> None:
+    """Both backends refuse to re-decide a flag, and keep the original author."""
+    session_id = new_event_id()
+    event = _event(session_id, 0, type_=LLM_RESPONSE)
+    await store.append(event)
+    flag = _flag(session_id, event.event_id)
+    await store.put_flag(flag)
+
+    at = datetime(2026, 9, 28, 9, 30, tzinfo=UTC)
+    assert (
+        await store.adjudicate_flag(
+            flag.flag_id, Adjudication.CONFIRMED, adjudicated_by="first@example", at=at
+        )
+        is True
+    )
+    assert (
+        await store.adjudicate_flag(
+            flag.flag_id, Adjudication.REJECTED, adjudicated_by="second@example"
+        )
+        is False
+    )
+
+    stored = await store.get_flags(session_id=session_id)
+    assert [f.flag_id for f in stored] == [flag.flag_id]
+    assert stored[0].adjudication is Adjudication.CONFIRMED
+    assert stored[0].adjudicated_by == "first@example"
+    assert stored[0].adjudicated_at == at
+
+
 async def test_flagged_session_appears_in_flag_filtered_listing(store: EventStore) -> None:
     session_id = new_event_id()
     event = _event(session_id, 0, type_=LLM_RESPONSE)

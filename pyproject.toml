@@ -197,9 +197,15 @@ markers = [
 [tool.coverage.run]
 source = ["src/sentinel"]
 branch = true
-# The Postgres memory adapter (S1-T11) is exercised by the Postgres
-# integration job in CI, not by the offline unit gate.
-omit = ["src/sentinel/memory/postgres.py"]
+# The Postgres memory adapter (S1-T11) and the Postgres event store (S2-T4)
+# are exercised by the Postgres integration job in CI, not by the offline unit
+# gate, which runs without a database. The store's declarative ORM models are
+# imported by nothing but the store itself, so they carry no logic to unit-test.
+omit = [
+    "src/sentinel/memory/postgres.py",
+    "src/sentinel/store/postgres.py",
+    "src/sentinel/store/models.py",
+]
 
 [tool.coverage.report]
 show_missing = true

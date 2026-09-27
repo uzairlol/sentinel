@@ -28,6 +28,9 @@ from sentinel.models.flags import (
     register_category,
 )
 
+#: A fixed decision timestamp, so tests never read the clock.
+_DECIDED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+
 
 def _evidence(role: EvidenceRole = EvidenceRole.CLAIM) -> list[EvidenceRef]:
     return [EvidenceRef(event_id=new_event_id(), role=role, seq=7)]
@@ -187,9 +190,32 @@ def test_unknown_field_is_rejected() -> None:
 
 def test_adjudication_enum_is_exhaustive() -> None:
     assert {member.value for member in Adjudication} == {"pending", "confirmed", "rejected"}
-    assert Flag(**{**_flag().model_dump(), "adjudication": "confirmed"}).adjudication is (
-        Adjudication.CONFIRMED
+    decided = Flag(
+        **{
+            **_flag().model_dump(),
+            "adjudication": "confirmed",
+            "adjudicated_by": "alice",
+            "adjudicated_at": _DECIDED_AT,
+        }
     )
+    assert decided.adjudication is Adjudication.CONFIRMED
+
+
+def test_a_decision_must_say_who_and_when() -> None:
+    """A confirmed flag with no author is a decision nobody can be asked about."""
+    with pytest.raises(ValidationError, match="requires adjudicated_by"):
+        Flag(**{**_flag().model_dump(), "adjudication": "confirmed"})
+
+
+def test_an_author_requires_a_decision() -> None:
+    with pytest.raises(ValidationError, match="require a non-pending adjudication"):
+        Flag(
+            **{
+                **_flag().model_dump(),
+                "adjudicated_by": "alice",
+                "adjudicated_at": _DECIDED_AT,
+            }
+        )
 
 
 # -- helpers ----------------------------------------------------------------

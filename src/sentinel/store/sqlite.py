@@ -717,14 +717,26 @@ class SQLiteEventStore(EventStore):
         adjudicated_by: str,
         at: datetime | None = None,
     ) -> bool:
-        """Record a human decision on *flag_id*; ``False`` when unknown."""
+        """Record a human decision on *flag_id*; ``False`` when nothing changed.
+
+        First write wins: a decided flag is not re-decided, so a second
+        reviewer cannot overwrite the first decision and the row keeps saying
+        what the module found. ``False`` means either "no such flag" or "already
+        decided"; re-read to tell them apart.
+        """
         conn = await self._conn()
         stamp = _ts_to_str(at or datetime.now(UTC))
         async with self._lock:
             cursor = await conn.execute(
                 "UPDATE flags SET adjudication = ?, adjudicated_by = ?, adjudicated_at = ? "
-                "WHERE flag_id = ?",
-                (adjudication.value, adjudicated_by, stamp, flag_id),
+                "WHERE flag_id = ? AND adjudication = ?",
+                (
+                    adjudication.value,
+                    adjudicated_by,
+                    stamp,
+                    flag_id,
+                    Adjudication.PENDING.value,
+                ),
             )
             changed = cursor.rowcount
             await conn.commit()

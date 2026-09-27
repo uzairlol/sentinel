@@ -291,7 +291,7 @@ See [`§2.11`](#211-gate-failure-protocol). Restated for emphasis: **a failed ga
 | `S0` | `0 → 5` | `[x]` | Passed | Vertical slice green on `main`: event envelope, session/raw-`instrument_ollama_call` capture, SQLite store, `sentinel replay` CLI, E2E vs respx-stubbed Ollama. 31 tests / 99.3% coverage, `mypy --strict` clean, `v0.0.2` tagged. |
 | `S1` | `5 → 15` | `[x]` | Passed | Instrumentation layer core green on `main`: event taxonomy + INV-3 refs, registry/config, capture worker (bounded queue, fail-open, redaction), LangChain + LangGraph + raw-Ollama/OpenAI-compat + generic `trace` + memory adapters, call-graph query helper. 115 tests / 95.3% coverage, `mypy --strict`/ruff/format/pre-commit clean, `v0.0.3` tagged. `S1-T15` sampling and `S1-T16` streaming caps deferred to `S2`. |
 | `S2` | `15 → 25` | `[x]` | Passed | Event store hardening green on `main`: Alembic migrations, Postgres store (batched append, streaming replay, call graph, session listing, health, gap detection, keyset retention prune with tombstones), SQLite/Postgres parity contract, 1M-event losslessness gate, truncation (`S1-T16`) + sampling (`S1-T15`), least-privilege DB roles + compose reference stack. 190 tests / 92.4% coverage, `mypy --strict`/ruff/bandit clean; `S2-T19` backup/restore smoke skips where `pg_dump`/`psql` are absent (runs in CI with tooling). |
-| `S3` | `25 → 35` | `[ ]` | — | — |
+| `S3` | `25 → 35` | `[x]` | Passed | First detector green on `main`: universal `Flag` row (deterministic identity, typed evidence, first-write-wins adjudication, ADR-0012), `EvaluatorWorker` (checkpoints, retries, batching, `SessionView`, call graph), claim extraction + grounding lexicon, provenance diff (ungrounded/contradicted), review routing, 22-case adversarial corpus. **FP 0.00%, FN 0.00%** on the corpus via `sentinel eval-fixtures --module provenance`; 398 tests / 90.5% coverage (Postgres store measured by the integration job, not the offline gate), `mypy --strict`/ruff/bandit clean. Documented in [`docs/modules/provenance.md`](../modules/provenance.md) and [`docs/flag-schema.md`](../flag-schema.md). |
 | `S4` | `35 → 45` | `[ ]` | — | — |
 | `S5` | `45 → 55` | `[ ]` | — | — |
 | `S6` | `55 → 65` | `[ ]` | — | — |
@@ -694,31 +694,31 @@ A trustworthy, queryable, production-grade event store. This is the **MVP-ready 
 #### Task Breakdown
 
 **Flag schema & worker framework**
-- [ ] `S3-T1` (P0) Define `Flag`: `flag_id`, `session_id`, `event_id`(s) referenced, `module`, `module_version`, `category`, `severity` (enum: `info`/`low`/`medium`/`high`/`critical`), `confidence` [0,1], `summary`, `evidence` (list of event refs), `created_at`, `adjudication` (`pending`/`confirmed`/`rejected`), `adjudicated_by`, `adjudicated_at`. Persist in `flags`.
-- [ ] `S3-T2` (P0) `EvaluatorWorker` base: config, idempotency key (deterministic from session+module+version), retry, backoff, checkpointing so restarts don't reprocess or lose work.
-- [ ] `S3-T3` (P0) Worker processes **completed** sessions (a session-close trigger or watermark), plus an on-demand "evaluate this session now" API for the gate path.
-- [ ] `S3-T4` (P1) Determinism requirement: same inputs + same module version → identical flags (needed for reproducible FP/FN and for replay).
+- [x] `S3-T1` (P0) Define `Flag`: `flag_id`, `session_id`, `event_id`(s) referenced, `module`, `module_version`, `category`, `severity` (enum: `info`/`low`/`medium`/`high`/`critical`), `confidence` [0,1], `summary`, `evidence` (list of event refs), `created_at`, `adjudication` (`pending`/`confirmed`/`rejected`), `adjudicated_by`, `adjudicated_at`. Persist in `flags`.
+- [x] `S3-T2` (P0) `EvaluatorWorker` base: config, idempotency key (deterministic from session+module+version), retry, backoff, checkpointing so restarts don't reprocess or lose work.
+- [x] `S3-T3` (P0) Worker processes **completed** sessions (a session-close trigger or watermark), plus an on-demand "evaluate this session now" API for the gate path.
+- [x] `S3-T4` (P1) Determinism requirement: same inputs + same module version → identical flags (needed for reproducible FP/FN and for replay).
 
 **Claim extraction**
-- [ ] `S3-T5` (P0) Extraction pass over `llm.response` / reasoning traces: classify spans as `grounded_claim` (cites a tool/retrieval/source), `numeric_claim`, or `ungrounded`. Start rule/template-based, then a pluggable small-model classifier behind an interface.
-- [ ] `S3-T6` (P0) Normalize each grounded claim to a structured form: `{claim_text, claimed_source, claimed_value?}`.
-- [ ] `S3-T7` (P1) Handle "implicit grounding" language: "according to the document", "the search returned", "the API shows", etc. — a maintained lexicon with tests.
+- [x] `S3-T5` (P0) Extraction pass over `llm.response` / reasoning traces: classify spans as `grounded_claim` (cites a tool/retrieval/source), `numeric_claim`, or `ungrounded`. Start rule/template-based, then a pluggable small-model classifier behind an interface.
+- [x] `S3-T6` (P0) Normalize each grounded claim to a structured form: `{claim_text, claimed_source, claimed_value?}`.
+- [x] `S3-T7` (P1) Handle "implicit grounding" language: "according to the document", "the search returned", "the API shows", etc. — a maintained lexicon with tests.
 
 **Provenance diff**
-- [ ] `S3-T8` (P0) `provenance_diff(session, claims, call_graph)`: for each claim, find the referenced tool call; if none exists → flag `ungrounded_claim`; if one exists but the returned value disagrees → flag `contradicted_claim` (with the actual observed value in evidence).
-- [ ] `S3-T9` (P0) Severity mapping: ungrounded claim about a consequential value (money, legal, safety, quantity) escalates severity; default severity `medium`.
-- [ ] `S3-T10` (P1) Confidence estimation: combine extraction confidence and diff certainty; low-confidence flags are marked for human review rather than gated.
-- [ ] `S3-T11` (P1) Make the whole path **reusable** as `sentinel.eval.provenance_core` so `S4` imports it (this is the shared mechanism noted in the design doc).
+- [x] `S3-T8` (P0) `provenance_diff(session, claims, call_graph)`: for each claim, find the referenced tool call; if none exists → flag `ungrounded_claim`; if one exists but the returned value disagrees → flag `contradicted_claim` (with the actual observed value in evidence).
+- [x] `S3-T9` (P0) Severity mapping: ungrounded claim about a consequential value (money, legal, safety, quantity) escalates severity; default severity `medium`.
+- [x] `S3-T10` (P1) Confidence estimation: combine extraction confidence and diff certainty; low-confidence flags are marked for human review rather than gated.
+- [x] `S3-T11` (P1) Make the whole path **reusable** as `sentinel.eval.provenance_core` so `S4` imports it (this is the shared mechanism noted in the design doc).
 
 **Adversarial fixtures & measurement**
-- [ ] `S3-T12` (P0) Build a fixture corpus: **known-good** sessions (accurate citations) and **known-bad** sessions (fabricated citations, contradicted values, cherry-picked numbers). Store as replayable event sequences.
-- [ ] `S3-T13` (P0) Harness: `sentinel eval-fixtures --module provenance` prints a confusion matrix; compute FP/FN rates.
-- [ ] `S3-T14` (P0) Set a gate threshold: FP rate ≤ target (e.g. ≤ 5% on the corpus) and FN rate ≤ target (e.g. ≤ 10%) before the module is considered usable; otherwise tune.
-- [ ] `S3-T15` (P1) Human-review routing: flags with confidence below threshold never gate, they queue for review (feeds `S7`).
+- [x] `S3-T12` (P0) Build a fixture corpus: **known-good** sessions (accurate citations) and **known-bad** sessions (fabricated citations, contradicted values, cherry-picked numbers). Store as replayable event sequences.
+- [x] `S3-T13` (P0) Harness: `sentinel eval-fixtures --module provenance` prints a confusion matrix; compute FP/FN rates.
+- [x] `S3-T14` (P0) Set a gate threshold: FP rate ≤ target (e.g. ≤ 5% on the corpus) and FN rate ≤ target (e.g. ≤ 10%) before the module is considered usable; otherwise tune.
+- [x] `S3-T15` (P1) Human-review routing: flags with confidence below threshold never gate, they queue for review (feeds `S7`).
 
 **Docs & integration**
-- [ ] `S3-T16` (P1) `docs/modules/provenance.md`: methodology, severity model, FP/FN on the corpus, limitations.
-- [ ] `S3-T17` (P1) Example: an agent prompted to fabricate a citation is caught end-to-end.
+- [x] `S3-T16` (P1) `docs/modules/provenance.md`: methodology, severity model, FP/FN on the corpus, limitations.
+- [x] `S3-T17` (P1) Example: an agent prompted to fabricate a citation is caught end-to-end.
 
 #### Standards Focus
 
@@ -726,22 +726,22 @@ Flag/evidence schema design, worker idempotency, deterministic evaluators, adver
 
 #### Tests & Verification
 
-- [ ] Unit: claim extraction on a labeled set; provenance diff on synthetic call graphs.
-- [ ] Property: diff is deterministic and order-independent; no claim produces more than one primary flag.
-- [ ] Adversarial: every known-bad fixture is caught; no known-good fixture is flagged (or within the stated FP budget).
-- [ ] Idempotency: running the worker twice yields identical flags, no duplicates.
-- [ ] Evidence completeness: every flag references at least one real event ID.
+- [x] Unit: claim extraction on a labeled set; provenance diff on synthetic call graphs.
+- [x] Property: diff is deterministic and order-independent; no claim produces more than one primary flag.
+- [x] Adversarial: every known-bad fixture is caught; no known-good fixture is flagged (or within the stated FP budget).
+- [x] Idempotency: running the worker twice yields identical flags, no duplicates.
+- [x] Evidence completeness: every flag references at least one real event ID.
 
 #### Exit Criteria
 
-| # | Criterion | Verified by |
-|---|---|---|
-| 1 | The flag schema is implemented, persisted, and documented | schema test + doc |
-| 2 | Fabricated-citation and contradicted-value sessions are caught without manual intervention | adversarial tests |
-| 3 | FP ≤ 5%, FN ≤ 10% on the corpus (documented actual numbers) | `eval-fixtures` report |
-| 4 | Worker is idempotent and restart-safe | idempotency test |
-| 5 | `provenance_core` is a reusable, tested library boundary | code review |
-| 6 | Every flag carries complete, valid evidence refs | test |
+| # | Criterion | Verified by | Result |
+|---|---|---|---|
+| 1 | The flag schema is implemented, persisted, and documented | schema test + doc | Pass — [`docs/flag-schema.md`](../flag-schema.md), [`docs/adr/0012`](../adr/0012-flag-schema.md) |
+| 2 | Fabricated-citation and contradicted-value sessions are caught without manual intervention | adversarial tests | Pass — all 13 known-bad cases flagged |
+| 3 | FP ≤ 5%, FN ≤ 10% on the corpus (documented actual numbers) | `eval-fixtures` report | Pass — **FP 0.00%, FN 0.00%**, claim FP 0.00% on 22 cases |
+| 4 | Worker is idempotent and restart-safe | idempotency test | Pass — re-running yields identical `flag_id`s, zero new rows |
+| 5 | `provenance_core` is a reusable, tested library boundary | code review | Pass — no reverse dependency on `sentinel.instrument` (INV-1 cold-subprocess test) |
+| 6 | Every flag carries complete, valid evidence refs | test | Pass — non-empty, ULID-checked, role-typed, no duplicate pairs |
 
 #### Risks & Mitigations
 
@@ -756,14 +756,16 @@ Flag/evidence schema design, worker idempotency, deterministic evaluators, adver
 
 The flag schema, worker framework, and provenance core are now reusable by all later modules. `S4` reuses them directly.
 
+**Measured on the corpus** (`uv run sentinel eval-fixtures --module provenance`, 22 cases): 13 true positives, 0 false negatives, 0 false positives, 9 true negatives — case FP `0.00%`, FN `0.00%`, claim FP `0.00%`, against budgets of ≤ 5% FP and ≤ 10% FN. Rule-by-rule breakdown, the severity model, and the known blind spots are in [`docs/modules/provenance.md`](../modules/provenance.md).
+
 #### GO / NO-GO Checklist
 
-- [ ] All Exit Criteria rows pass.
-- [ ] FP/FN measured and within budget on the corpus.
-- [ ] The flag schema is declared stable (or an ADR records changes).
-- [ ] Status Board updated: `S3` = `[x]`.
-- [ ] No open `gate-failure` issue.
-- [ ] If FP/FN budgets are not met → **NO-GO**; do not proceed to memory integrity until the error rate is defensible.
+- [x] All Exit Criteria rows pass.
+- [x] FP/FN measured and within budget on the corpus.
+- [x] The flag schema is declared stable (or an ADR records changes).
+- [x] Status Board updated: `S3` = `[x]`.
+- [x] No open `gate-failure` issue.
+- [x] If FP/FN budgets are not met → **NO-GO**; do not proceed to memory integrity until the error rate is defensible. *(Budgets met: FP 0.00%, FN 0.00% — **GO**.)*
 
 ---
 

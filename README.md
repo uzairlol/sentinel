@@ -19,12 +19,12 @@ checkpoint until a human approves, rejects, or requests revision.
 
 ## Status
 
-**Pre-alpha (maturity `25`).** Sprint `S2` (event store hardening — migrations,
-Postgres store, retention, losslessness) gate is green on `main`; `S1`
-(instrumentation layer core) is done. 190 tests / ~92% coverage, `mypy --strict`
-+ ruff + bandit clean. See the master plan in
+**Pre-alpha (maturity `35`).** Sprint `S3` (first evaluator module — flag
+schema, worker framework, and tool-use provenance) gate is green on `main`,
+with `S1` (instrumentation) and `S2` (event store) before it. 398 tests / ~90%
+coverage, `mypy --strict` + ruff + bandit clean. See the master plan in
 [`SENTINEL_TDD.md`](docs/design/SENTINEL_TDD.md) for the full
-`-1 → 101` roadmap, per-sprint work packages, and exit gates — the `S2` row of
+`-1 → 101` roadmap, per-sprint work packages, and exit gates — the `S3` row of
 the [Roadmap Status Board](docs/design/SENTINEL_TDD.md#34-roadmap-status-board)
 records the gate result.
 
@@ -33,6 +33,8 @@ records the gate result.
 - [`SENTINEL_TDD.md`](docs/design/SENTINEL_TDD.md) — master technical design document and development roadmap
 - [`docs/design/safety_sdk.tex`](docs/design/safety_sdk.tex) — original conceptual design (LaTeX)
 - [`docs/design/safety_sdk.pdf`](docs/design/safety_sdk.pdf) — compiled version of the original design
+- [`docs/flag-schema.md`](docs/flag-schema.md) — what an evaluator concluded, its evidence, and its review lifecycle
+- [`docs/modules/provenance.md`](docs/modules/provenance.md) — the `S3` module: methodology, severity model, measured FP/FN, limitations
 
 ## Quickstart (vertical slice, `S0`)
 
@@ -63,7 +65,35 @@ uv run sentinel health --dsn "$SENTINEL_STORE_DSN"
 
 Provisioning uses three least-privilege roles (ADR-0011): `sentinel_migrator`,
 `sentinel_writer`, `sentinel_reader` — see `deploy/roles.sql` and
-`deploy/README.md`.
+`deploy/README.md`. A fourth, `sentinel_reviewer`, may update flags to record a
+human decision; the writer role stays append-only.
+
+## Evaluating a session (Sprint `S3`)
+
+The provenance module flags assertions no tool result supports, and values the
+logged tool output refutes. Measure it against the adversarial corpus:
+
+```bash
+uv run sentinel eval-fixtures --module provenance
+```
+
+```
+corpus: 22 cases  module=sentinel.tool_grounding@0.1.0
+confusion matrix (case level)
+                flagged  silent
+  should flag       13       0   <- recall 100.00%
+  should be quiet     0       9   <- precision 100.00%
+
+  false-negative rate: 0.00% (gate <= 10%)
+  false-positive rate: 0.00% (gate <= 0%)
+  claim FP rate:       0.00% (gate <= 5%)
+PASS
+```
+
+Exit code `0` = within budget, `1` = budget breached, `2` = bad usage. To
+evaluate a real session, hand its events to `sentinel.eval.provenance` and read
+the flags back from the store — see
+[`docs/modules/provenance.md`](docs/modules/provenance.md).
 
 ## Repository layout
 

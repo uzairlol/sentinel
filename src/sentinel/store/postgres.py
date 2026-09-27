@@ -768,7 +768,11 @@ class PostgresEventStore(EventStore):
         adjudicated_by: str,
         at: datetime | None = None,
     ) -> bool:
-        """Record a human decision on *flag_id*; ``False`` when unknown.
+        """Record a human decision on *flag_id*; ``False`` when nothing changed.
+
+        First write wins: a decided flag is not re-decided, so a second reviewer
+        cannot overwrite the first decision and the row keeps saying what the
+        module found. ``False`` means either "no such flag" or "already decided".
 
         Needs a credential with ``UPDATE`` on ``flags`` (the
         ``sentinel_reviewer`` role) — the append-only writer credential is
@@ -783,6 +787,7 @@ class PostgresEventStore(EventStore):
                 result = await session.execute(
                     self._update(FlagRecord)
                     .where(FlagRecord.flag_id == flag_id)
+                    .where(FlagRecord.adjudication == Adjudication.PENDING.value)
                     .values(
                         adjudication=adjudication.value,
                         adjudicated_by=adjudicated_by,

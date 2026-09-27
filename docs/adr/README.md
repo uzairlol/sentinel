@@ -46,3 +46,4 @@ What we rejected, and why.
 | [0009](0009-small-public-api-surface.md) | Small stable public API surface; SemVer policy | Accepted |
 | [0010](0010-ulid-event-ids.md) | ULID event IDs + monotonic sequence | Accepted |
 | [0011](0011-append-only-db-layer.md) | Append-only enforced at the DB layer: three least-privilege roles | Accepted |
+| [0012](0012-flag-schema.md) | The universal flag row: deterministic identity, typed evidence, adjudication | Accepted |

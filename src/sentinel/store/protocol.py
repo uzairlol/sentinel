@@ -128,7 +128,11 @@ class EventStore(Protocol):
         adjudicated_by: str,
         at: datetime | None = None,
     ) -> bool:
-        """Record a human decision on *flag_id*; ``False`` when not found.
+        """Record a human decision on *flag_id*; first write wins.
+
+        ``False`` means nothing changed: either no such flag, or it was already
+        decided. A second reviewer cannot overwrite the first decision, so the
+        row keeps saying what the module found (ADR-0012).
 
         This is the one mutating flag operation and it needs a credential with
         ``UPDATE`` on ``flags`` (the ``sentinel_reviewer`` role), never the
