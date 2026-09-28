@@ -36,7 +36,7 @@ becomes a record of what someone last thought rather than what was found.
 | `flag_id` | ULID derived from SHA-256 of `(session_id, module, module_version, category, dedupe_key)`. Pure function of its inputs: a re-run rewrites the same row. |
 | `session_id`, `event_id` | Where to look. `event_id` is the primary trigger when there is one. |
 | `module`, `module_version` | Who is complaining, and which version of the rules. The version is in the identity on purpose: a rules change is a new finding, never an overwrite. |
-| `category` | `lower_snake_case` slug, open taxonomy via `register_category()`. `provenance` registers `ungrounded_claim` and `contradicted_claim`. |
+| `category` | `lower_snake_case` slug, open taxonomy via `register_category()`. `provenance` registers `ungrounded_claim`, `contradicted_claim` and `unsourced_citation`. |
 | `severity` | `info`/`low`/`medium`/`high`/`critical`, default `medium`, ordered and comparable. |
 | `confidence` | `[0, 1]`. Meanings differ per module, so the definition is the module's, not the schema's. |
 | `summary` | One human-readable line, ≤ 2000 chars. Flags are read one at a time. |

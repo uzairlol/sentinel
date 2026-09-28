@@ -39,8 +39,8 @@ def test_the_matrix_counts_both_directions(
     main(["eval-fixtures", "--module", "provenance"])
 
     out = capsys.readouterr().out
-    assert "22 cases" in out
-    # 13 cases expect a flag, 9 expect silence: a detector that only ever said
+    assert "28 cases" in out
+    # 16 cases expect a flag, 12 expect silence: a detector that only ever said
     # "clean" could not tell the two apart, so the matrix has to show both.
     assert "should flag" in out
     assert "should be quiet" in out
@@ -57,10 +57,10 @@ def test_json_output_carries_the_gates_for_ci(
     assert code == 0
     assert payload["passed"] is True
     assert payload["confusion"] == {
-        "true_positives": 13,
+        "true_positives": 16,
         "false_negatives": 0,
         "false_positives": 0,
-        "true_negatives": 9,
+        "true_negatives": 12,
     }
     assert payload["gates"]["max_false_negative_rate"] == 0.1
     assert payload["gates"]["max_false_positive_rate"] == 0.0

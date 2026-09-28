@@ -32,7 +32,6 @@ from sentinel.eval.provenance import MODULE, MODULE_VERSION
 from sentinel.eval.provenance_core import (
     DiffContext,
     RuleBasedClaimExtractor,
-    Verdict,
     diff_claim,
     is_actionable,
     severity_for,
@@ -263,6 +262,8 @@ def run_case(case: CorpusCase, *, cited: bool | None = None) -> CaseOutcome:
     view = _view_for(events)
     produced: list[ExpectedFinding] = []
 
+    from sentinel.eval.provenance import category_for
+
     for response in view.llm_responses():
         context = _context_for(view, response)
         for claim in extractor.extract_sync(response_text_of(response)):
@@ -271,11 +272,7 @@ def run_case(case: CorpusCase, *, cited: bool | None = None) -> CaseOutcome:
                 continue
             produced.append(
                 ExpectedFinding(
-                    category=(
-                        "contradicted_claim"
-                        if diff.verdict is Verdict.CONFLICTED
-                        else "ungrounded_claim"
-                    ),
+                    category=category_for(diff),
                     claim_contains=claim.text,
                     verdict=str(diff.verdict),
                     severity=str(severity_for(claim, diff)),
@@ -303,8 +300,8 @@ def run_case(case: CorpusCase, *, cited: bool | None = None) -> CaseOutcome:
 def run_corpus(
     cases: Sequence[CorpusCase] | None = None,
     *,
-    module: str = "sentinel.tool_grounding",
-    module_version: str = "0.1.0",
+    module: str = MODULE,
+    module_version: str = MODULE_VERSION,
 ) -> CorpusReport:
     """Run the whole corpus and measure the gate metrics (``S3-T13``)."""
     report = CorpusReport(module=module, module_version=module_version)
@@ -347,10 +344,19 @@ def _view_for(events: Sequence[Event]) -> SessionView:
 
 
 def _context_for(view: SessionView, response: Event) -> DiffContext:
-    """The evidence available to *response*, as the worker would gather it."""
-    from sentinel.eval.provenance import gather_evidence
+    """The evidence available to *response*, as the worker would gather it.
 
-    context, _refs = gather_evidence(view.graph, response)
+    Goes through the worker's own :func:`gather_evidence` and
+    :func:`_citations_recorded` on purpose. A harness that rebuilt the context
+    itself would keep measuring the rules as they were when it was written, and
+    the first symptom would be a category the module emits that the corpus
+    cannot express.
+    """
+    from sentinel.eval.provenance import _citations_recorded, gather_evidence
+
+    context, _refs = gather_evidence(
+        view.graph, response, citations_recorded=_citations_recorded(view)
+    )
     return context
 
 

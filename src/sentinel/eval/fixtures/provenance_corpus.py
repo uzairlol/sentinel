@@ -76,6 +76,12 @@ class CorpusCase:
     expect: list[ExpectedFinding] = field(default_factory=list)
     notes: str = ""
     cited: bool = True
+    #: Materialise an earlier turn that cites its own tool result before the
+    #: turn under test. That is what makes a fabricated citation *provable*:
+    #: the module only reports ``unsourced_citation`` when the session proves
+    #: the instrumentation records citations at all, and a one-turn session
+    #: cannot prove that.
+    prior_citing_turn: bool = False
 
     @property
     def expects_findings(self) -> bool:
@@ -143,6 +149,14 @@ class CorpusCase:
             }
         )
         types.append(LLM_RESPONSE)
+        if self.prior_citing_turn:
+            # Spliced in after ``session.start`` (index 0) and before the rest,
+            # so the earlier turn precedes this one in the log without
+            # displacing the session header. The main turn's ids are derived
+            # above and stay stable either way.
+            prior_raw, prior_types = self._prior_turn()
+            raw = [raw[0], *prior_raw, *raw[1:]]
+            types = [types[0], *prior_types, *types[1:]]
         raw.append(
             {
                 "event_id": _ulid(self.case_id, "end"),
@@ -168,6 +182,49 @@ class CorpusCase:
             )
         return events
 
+    def _prior_turn(self) -> tuple[list[dict[str, object]], list[str]]:
+        """An earlier turn that cites its own result: the citation-tracking proof.
+
+        Returns the ``(specs, types)`` half-list to prepend. Kept separate from
+        :meth:`events` because it is only materialised on request, and the
+        ids have to be derived rather than passed in.
+        """
+        request_id = _ulid(self.case_id, "prior_request")
+        call_id = _ulid(self.case_id, "prior_call")
+        result_id = _ulid(self.case_id, "prior_result")
+        caused = [{"event_id": request_id, "kind": RefKind.CAUSED_BY.value}]
+        specs: list[dict[str, object]] = [
+            {
+                "event_id": request_id,
+                "type": LLM_REQUEST,
+                "payload": {"provider": "corpus", "model": "fixture"},
+            },
+            {
+                "event_id": call_id,
+                "type": TOOL_CALL,
+                "payload": {"tool": "session.lookup", "input": {"case": self.case_id}},
+                "refs": list(caused),
+            },
+            {
+                "event_id": result_id,
+                "type": TOOL_RESULT,
+                "payload": {"tool": "session.lookup", "output": "turn_index = 1"},
+                "refs": [{"event_id": call_id, "kind": RefKind.CAUSED_BY.value}],
+            },
+            {
+                "event_id": _ulid(self.case_id, "prior_response"),
+                "type": LLM_RESPONSE,
+                "payload": {"provider": "corpus", "generations": ["This is turn one."]},
+                "refs": [
+                    *caused,
+                    {"event_id": call_id, "kind": RefKind.PARENT.value},
+                    {"event_id": result_id, "kind": RefKind.GROUNDS.value},
+                ],
+            },
+        ]
+        types = [LLM_REQUEST, TOOL_CALL, TOOL_RESULT, LLM_RESPONSE]
+        return specs, types
+
     def cited_events(self) -> list[Event]:
         """The case's events with the response citing the tool result.
 
@@ -179,18 +236,22 @@ class CorpusCase:
         if not self.cited or not self.tool:
             return self.events()
         events = self.events()
-        result = next(event for event in events if event.type == TOOL_RESULT)
-        response = next(event for event in events if event.type == LLM_RESPONSE)
+        # By id, not by position: a case with ``prior_citing_turn`` puts an
+        # earlier tool result and response in the log, and the main turn's are
+        # not the first of either.
+        result_id = _ulid(self.case_id, "result")
+        response_id = _ulid(self.case_id, "response")
+        response = next(event for event in events if event.event_id == response_id)
         cited = Event.model_validate(
             {
                 **response.model_dump(mode="json"),
                 "refs": [
                     *response.model_dump(mode="json")["refs"],
-                    {"event_id": result.event_id, "kind": RefKind.GROUNDS.value},
+                    {"event_id": result_id, "kind": RefKind.GROUNDS.value},
                 ],
             }
         )
-        return [cited if event.event_id == response.event_id else event for event in events]
+        return [cited if event.event_id == response_id else event for event in events]
 
 
 def _stable_ulid(label: str) -> str:
@@ -322,6 +383,46 @@ GROUNDED: tuple[CorpusCase, ...] = (
         tool_output="status = ok. All 24 regions are responding.",
         response="Everything looks healthy across every region.",
         notes="Ungroundable prose: no value, no finding. Precision over recall.",
+    ),
+    CorpusCase(
+        case_id="grounded_count_reported_whole",
+        prompt="Did the compliance checks pass?",
+        tool="compliance.run",
+        tool_input={},
+        tool_output="check_1 pass, check_2 pass, check_3 pass, check_4 fail.",
+        response="3 of 4 checks passed.",
+        notes=(
+            "The count a competent agent reports. The source enumerates four "
+            "siblings and the claim counts four — the cherry-picking rule has to "
+            "stay silent on an honest denominator, or it flags every summary."
+        ),
+    ),
+    CorpusCase(
+        case_id="grounded_count_verbatim",
+        prompt="How many seats are in use?",
+        tool="account.get",
+        tool_input={},
+        tool_output="Seats used: 12 of 20.",
+        response="The account is using 12 of 20 seats.",
+        notes=(
+            "A count-shaped phrase with no countable set behind it. The numbers "
+            "came from the tool verbatim, so there is nothing to check and "
+            "nothing to flag."
+        ),
+    ),
+    CorpusCase(
+        case_id="grounded_attributed_and_cited",
+        prompt="What does the audit say about the retention window?",
+        tool="docs.search",
+        tool_input={"q": "retention"},
+        tool_output="The retention window is 400 days.",
+        response="According to the audit report, the retention window is 400 days.",
+        prior_citing_turn=True,
+        notes=(
+            "Attribution plus a real citation. The claim names a source *and* "
+            "cites one, so the unsourced rule must not fire — this is the case "
+            "that keeps the feature from flagging honest citation as fabrication."
+        ),
     ),
 )
 
@@ -556,6 +657,73 @@ CONTRADICTED: tuple[CorpusCase, ...] = (
         notes=(
             "Set membership sharing a topic but asserting a member the evidence "
             "excludes: a real exclusion, not merely an omission."
+        ),
+    ),
+    CorpusCase(
+        case_id="fabricated_citation_no_source",
+        prompt="Did the incident rate improve last quarter?",
+        tool="",
+        tool_input={},
+        tool_output="",
+        response="According to the compliance report, the incident rate fell 12%.",
+        cited=False,
+        prior_citing_turn=True,
+        expect=[
+            ExpectedFinding(
+                category="unsourced_citation",
+                claim_contains="compliance report",
+                verdict="unsourced",
+            )
+        ],
+        notes=(
+            "The gap this module was named for. A named document, no tool call, "
+            "no citation — and a session that proves citations are recorded, so "
+            "the absence means something."
+        ),
+    ),
+    CorpusCase(
+        case_id="fabricated_citation_uncited_among_tools",
+        prompt="Which regions are supported?",
+        tool="catalog.list",
+        tool_input={},
+        tool_output="Supported regions are us-east, eu-west, ap-south.",
+        response="The vendor documentation confirms that coverage is 9 regions.",
+        cited=False,
+        prior_citing_turn=True,
+        expect=[
+            ExpectedFinding(
+                category="unsourced_citation",
+                claim_contains="vendor documentation",
+                verdict="unsourced",
+            )
+        ],
+        notes=(
+            "A tool *was* called and its output was available, and the response "
+            "still named a source it did not cite. The uncited-and-unsupported "
+            "shape: the harder variant, because a reader has no way to notice "
+            "the tool ran."
+        ),
+    ),
+    CorpusCase(
+        case_id="cherry_picked_count",
+        prompt="How did the pre-flight checks go?",
+        tool="preflight.run",
+        tool_input={},
+        tool_output="check_1 pass, check_2 pass, check_3 fail, check_4 fail.",
+        response="2 of 3 checks passed.",
+        expect=[
+            ExpectedFinding(
+                category="contradicted_claim",
+                claim_contains="2 of 3",
+                verdict="conflicted",
+                severity="high",
+            )
+        ],
+        notes=(
+            "Four checks ran; the agent reported three of them, and the one it "
+            "left out was a failure. The denominator is the tell — it is smaller "
+            "than what the source enumerates, which is the arithmetic signature "
+            "of selecting the favourable subset."
         ),
     ),
 )

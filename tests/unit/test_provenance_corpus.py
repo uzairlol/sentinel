@@ -49,7 +49,11 @@ class TestCorpusShape:
         assert any(case.expects_findings for case in CORPUS)
         assert any(not case.expects_findings for case in CORPUS)
         categories = {expected.category for case in CORPUS for expected in case.expect}
-        assert categories == {"contradicted_claim", "ungrounded_claim"}
+        assert categories == {
+            "contradicted_claim",
+            "ungrounded_claim",
+            "unsourced_citation",
+        }
 
     @pytest.mark.parametrize("case", CORPUS, ids=lambda case: case.case_id)
     def test_a_case_is_a_valid_linked_session(self, case: CorpusCase) -> None:

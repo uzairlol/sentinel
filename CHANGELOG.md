@@ -21,22 +21,48 @@ Sprint `S3` — Tool-Use Grounding & Provenance. First evaluator module.
   idempotent writes, bounded retries with jittered backoff, resumable
   checkpoints, bounded `SessionView`, and call-graph context.
 - Claim extraction (`sentinel.eval.provenance_core`): rule/template classifier
-  behind a `ClaimExtractor` protocol, a maintained deictic grounding lexicon,
-  and normalisation of each claim's text and value.
+  behind a `ClaimExtractor` protocol, maintained deictic *and* attribution
+  grounding lexicons, and normalisation of each claim's text, value and named
+  source.
 - Provenance diff: flags `ungrounded_claim` when no value in the turn supports a
   claim and `contradicted_claim` when the observed value refutes it, with the
   observed value carried in the flag and its evidence marked `countervailance`.
+- Fabricated citations: a claim that names a source ("according to the audit
+  report", "Acme") while the response cites no tool result is flagged
+  `unsourced_citation` with the named source in the flag details. Guarded by a
+  session-level precondition — the rule only runs in sessions that are proven to
+  record citations at all — and ordered last, so it can reclassify a claim
+  without ever creating a flag on silence alone.
+- Cherry-picked counts: a claim of the form "2 of 3 passed" is flagged
+  `ungrounded_claim` with `cherry_pick` support when the cited output shows a
+  larger set, and carries `high` severity whatever its claim kind.
+- Legal/safety severity weighting: `SAFETY_LEXICON` applies a severity *floor*
+  for the claim's subject (22 safety terms at `high`, 26 legal/regulatory terms at
+  `medium`) without overriding the severity the verdict already earned.
+- Reasoning-trace reading: `reasoning_text_of` reads `reasoning`,
+  `reasoning_content`, `thinking` and `thought` from a response payload or its
+  nested message, so the extractor can check claims the model abandoned
+  mid-thought. No instrumenter records those keys yet, so the seam currently
+  returns `""`; closing that is a capture change in `S1`.
 - Review routing (`S3-T15`): flags at or below the module's confidence
   threshold are written `review_only` and queue for `S7` instead of gating.
-- 22-case adversarial corpus (10 known-good, 12 known-bad; replayable event
-  sequences) and the `sentinel eval-fixtures --module provenance` harness, which
-  prints a confusion matrix with case/claim FP and FN rates. **Measured: FP
-  0.00%, FN 0.00%** against budgets of ≤ 5% FP / ≤ 10% FN.
+- 28-case adversarial corpus (12 known-good, 16 known-bad; replayable event
+  sequences) covering fabricated citations, contradicted values and cherry-picked
+  counts, plus known-good cases that specifically guard the new rules against
+  false positives, and the `sentinel eval-fixtures --module provenance` harness,
+  which prints a confusion matrix with case/claim FP and FN rates. **Measured:
+  FP 0.00%, FN 0.00%** against budgets of ≤ 5% FP / ≤ 10% FN.
 - `sentinel.eval.provenance` reusable core, store-free and guarded against
   depending back on `sentinel.instrument`. Built for `S4` to import; `S4` has
   not been written yet, so it has no consumer today.
 
 ### Changed
+
+- `MODULE_VERSION` is now `0.2.0` (was `0.1.0`). The new rules change what the
+  module finds, so the version bump changes the deterministic `flag_id` and
+  forces sessions evaluated under `0.1.0` to be re-evaluated rather than
+  silently keeping stale verdicts. `run_corpus` now defaults to the module's
+  version instead of a duplicated literal.
 
 - The offline coverage gate no longer counts the Postgres store and its ORM
   models, which it cannot execute without a database. They are no longer

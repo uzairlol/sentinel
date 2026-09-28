@@ -20,18 +20,19 @@ checkpoint until a human approves, rejects, or requests revision.
 ## Status
 
 **Pre-alpha (maturity `25 → 35`, in progress).** Sprint `S3` (first evaluator
-module — flag schema, worker framework, tool-use provenance) is a
-**conditional** pass on `main`, with `S1` (instrumentation) and `S2` (event
-store) before it. What works: the flag schema and adjudication model, the
-worker framework, and detection of an agent **contradicting its own tool
-output**, measured at **0.00% FP / 0.00% FN** over a 22-case corpus. What does
-not yet work: detection of an agent **citing a source it never consulted**, and
-of cherry-picked numbers — both are silent misses, and both are absent from the
-corpus, so the 0.00% figures describe a narrower test set than the sprint
-planned. See the known gaps in
-[`docs/design/SENTINEL_TDD.md`](docs/design/SENTINEL_TDD.md) and the
-[limitations](docs/modules/provenance.md#limitations) section before relying on
-this module. Test count, coverage, and `mypy --strict` + ruff + bandit status
+module — flag schema, worker framework, tool-use provenance) is a **complete**
+pass on `main`, with `S1` (instrumentation) and `S2` (event store) before it.
+What works: the flag schema and adjudication model, the worker framework, and
+detection of an agent **contradicting its own tool output**, **citing a source it
+never consulted**, and **quietly narrowing a result set to its favourable half** —
+measured at **0.00% FP / 0.00% FN** over a 28-case corpus that covers all three.
+What does not yet work, and is documented rather than hidden: a claim that names
+source A while citing source B is not yet resolved to a specific tool result, and
+no instrumenter records a reasoning trace yet (so the module can read one but
+nothing writes one). Those are the known gaps in
+[`docs/design/SENTINEL_TDD.md`](docs/design/SENTINEL_TDD.md); read the
+[limitations](docs/modules/provenance.md#limitations) before relying on this
+module. Test count, coverage, and `mypy --strict` + ruff + bandit status
 are reported in the master plan in
 [`SENTINEL_TDD.md`](docs/design/SENTINEL_TDD.md) for the full
 `-1 → 101` roadmap, per-sprint work packages, and exit gates — the `S3` row of
@@ -80,19 +81,20 @@ human decision; the writer role stays append-only.
 
 ## Evaluating a session (Sprint `S3`)
 
-The provenance module flags assertions no tool result supports, and values the
-logged tool output refutes. Measure it against the adversarial corpus:
+The provenance module flags assertions no tool result supports, values the
+logged tool output refutes, sources a session never cited, and counts that
+quietly narrow a larger set. Measure it against the adversarial corpus:
 
 ```bash
 uv run sentinel eval-fixtures --module provenance
 ```
 
 ```
-corpus: 22 cases  module=sentinel.tool_grounding@0.1.0
+corpus: 28 cases  module=sentinel.tool_grounding@0.2.0
 confusion matrix (case level)
                 flagged  silent
-  should flag       13       0   <- recall 100.00%
-  should be quiet     0       9   <- precision 100.00%
+  should flag       16       0   <- recall 100.00%
+  should be quiet     0      12   <- precision 100.00%
 
   false-negative rate: 0.00% (gate <= 10%)
   false-positive rate: 0.00% (gate <= 0%)

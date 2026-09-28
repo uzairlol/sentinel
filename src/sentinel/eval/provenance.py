@@ -47,7 +47,11 @@ from sentinel.eval.provenance_core import (
     normalize_text,
     severity_for,
 )
-from sentinel.eval.session import SessionView, response_text_of
+from sentinel.eval.session import (
+    SessionView,
+    reasoning_text_of,
+    response_text_of,
+)
 from sentinel.eval.worker import (
     CheckpointStore,
     EvaluatorWorker,
@@ -75,15 +79,24 @@ log = structlog.get_logger("sentinel.eval.provenance")
 #: Module name recorded on every provenance flag, and part of the idempotency
 #: key: any change to the rules ships as a version bump, which re-evaluates.
 MODULE = "sentinel.tool_grounding"
-MODULE_VERSION = "0.1.0"
+#: 0.2.0 adds per-claim source attribution (``unsourced_citation``) and
+#: cherry-picked-count detection, both of which produce findings 0.1.0 could not.
+#: The bump is what makes the idempotency key change, so sessions evaluated
+#: under 0.1.0 are re-evaluated rather than silently keeping stale verdicts.
+MODULE_VERSION = "0.2.0"
 
 #: Flag categories, per the universal flag schema.
 CATEGORY_UNGROUNDED = "ungrounded_claim"
 CATEGORY_CONTRADICTED = "contradicted_claim"
+#: The claim named a source and cited none, while the rest of the session
+#: proves citations are being recorded. Distinct from
+#: :data:`CATEGORY_UNGROUNDED` because the remedy is different: not "this
+#: number has no support" but "this document was never opened".
+CATEGORY_UNSOURCED = "unsourced_citation"
 
 #: Publish the taxonomy this module ships, so `known_categories()` and any tool
 #: that enumerates it agree with the code rather than with a doc.
-register_category(CATEGORY_UNGROUNDED, CATEGORY_CONTRADICTED)
+register_category(CATEGORY_UNGROUNDED, CATEGORY_CONTRADICTED, CATEGORY_UNSOURCED)
 
 #: Max tool results treated as evidence for one response. Bounded so a session
 #: with thousands of calls cannot make a single diff pathological.
@@ -191,6 +204,11 @@ class ClaimFinding:
             # S3-T8: a contradiction has to carry the value that refutes it,
             # otherwise the reviewer has to go and re-derive it by hand.
             details["observed_value"] = self.diff.matched_value
+        if self.claim.source_attributed:
+            # S3-T6: on a fabricated citation the interesting question is which
+            # document the agent made up, so it is a field rather than something
+            # a reviewer has to pick out of the prose summary.
+            details["claimed_source"] = self.claim.source_attributed
         if self.review_url:
             # A review link is deployment-shaped, so it rides in details rather
             # than the universal schema (docs/adr/0012-flag-schema.md).
@@ -210,6 +228,21 @@ class ClaimFinding:
             created_at=self.ts,
             review_only=review_only,
         )
+
+
+def category_for(diff: DiffResult) -> str:
+    """The flag category *diff* reports as.
+
+    One function rather than a mapping at each call site: the evaluator and the
+    corpus harness both need this, and when they disagreed the harness silently
+    stopped being able to test a category the module emitted — which is exactly
+    how a category ships untested.
+    """
+    if diff.verdict is Verdict.CONFLICTED:
+        return CATEGORY_CONTRADICTED
+    if diff.verdict is Verdict.UNSOURCED:
+        return CATEGORY_UNSOURCED
+    return CATEGORY_UNGROUNDED
 
 
 class ProvenanceEvaluator(EvaluatorWorker):
@@ -278,11 +311,7 @@ class ProvenanceEvaluator(EvaluatorWorker):
         return [
             ClaimFinding(
                 session_id=session.session_id,
-                category=(
-                    CATEGORY_CONTRADICTED
-                    if analysis.diff.verdict is Verdict.CONFLICTED
-                    else CATEGORY_UNGROUNDED
-                ),
+                category=category_for(analysis.diff),
                 claim=analysis.claim,
                 diff=analysis.diff,
                 severity=analysis.severity,
@@ -298,12 +327,24 @@ class ProvenanceEvaluator(EvaluatorWorker):
     async def analyze(self, session: SessionView) -> ProvenanceResult:
         """Analyze every response in *session*; pure and deterministic."""
         result = ProvenanceResult(session_id=session.session_id)
+        # Whether this instrumentation records citations at all. A session in
+        # which no response ever cites one cannot distinguish a fabricated
+        # source from a framework that never emits `GROUNDS` refs, so the
+        # unsourced rule stays switched off for it rather than guessing.
+        citations_recorded = _citations_recorded(session)
         for response in session.llm_responses():
             result.responses_seen += 1
-            context, refs = gather_evidence(session.graph, response)
+            context, refs = gather_evidence(
+                session.graph, response, citations_recorded=citations_recorded
+            )
             if not context.has_evidence:
                 result.responses_without_evidence += 1
-            for claim in await self._extractor.extract(response_text_of(response)):
+            # The answer and the reasoning trace are read as two spans of the
+            # same turn: a figure a model "revised" while thinking is grounded
+            # by exactly the evidence that would ground it in the answer. The
+            # trace is empty unless the capture layer records one, so this is
+            # today's behaviour plus a seam (see ``reasoning_text_of``).
+            for claim in await self._extractor.extract(_response_spans(response)):
                 diff = diff_claim(claim, context)
                 result.analyses.append(
                     ResponseAnalysis(
@@ -336,6 +377,8 @@ class ProvenanceEvaluator(EvaluatorWorker):
 def gather_evidence(
     graph: CallGraph,
     response: Event,
+    *,
+    citations_recorded: bool = False,
 ) -> tuple[DiffContext, tuple[EvidenceRef, ...]]:
     """Collect the evidence available to *response*.
 
@@ -393,8 +436,40 @@ def gather_evidence(
             explicit=tuple(explicit),
             context=tuple(context),
             implied=_implied_offerings(response, explicit + context),
+            citations_recorded=citations_recorded,
         ),
         tuple(explicit_refs + context_refs),
+    )
+
+
+def _response_spans(response: Event) -> str:
+    """The prose *response* asserts: its answer, plus any reasoning trace.
+
+    The trace is joined after the answer and separated by a blank line so
+    :func:`split_sentences` treats the boundary as one. Without the separator a
+    trace ending mid-sentence would merge with the answer's first sentence and
+    produce a claim that quotes text from neither — the kind of finding that
+    erodes an operator's trust in every other flag in the queue.
+    """
+    answer = response_text_of(response)
+    trace = reasoning_text_of(response)
+    if not trace:
+        return answer
+    return f"{answer}\n\n{trace}" if answer else trace
+
+
+def _citations_recorded(session: SessionView) -> bool:
+    """Whether any response in *session* cites a tool result.
+
+    Session-scoped on purpose. One response citing nothing is unremarkable; a
+    whole session citing nothing usually means the instrumentation never emits
+    ``GROUNDS`` refs, and treating that as six fabricated citations would be
+    worse than not looking.
+    """
+    return any(
+        ref.kind is RefKind.GROUNDS and ref.event_id in session.graph.nodes
+        for response in session.llm_responses()
+        for ref in response.refs
     )
 
 

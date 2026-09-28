@@ -100,8 +100,9 @@ Open taxonomy, `lower_snake_case`. Modules register what they ship via
 
 | Category | Module | Meaning |
 |---|---|---|
-| `ungrounded_claim` | `sentinel.tool_grounding` | A specific checkable assertion no tool result supports. |
+| `ungrounded_claim` | `sentinel.tool_grounding` | A specific checkable assertion no tool result supports — including a count that narrows a larger set. |
 | `contradicted_claim` | `sentinel.tool_grounding` | An assertion the cited evidence refutes. |
+| `unsourced_citation` | `sentinel.tool_grounding` | An assertion naming a source the session never cited. Carries `details["claimed_source"]`. |
 
 Registration is advisory: a category validates as a slug regardless, so a module
 can ship a category before the docs catch up.

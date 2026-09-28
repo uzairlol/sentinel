@@ -221,6 +221,56 @@ def response_text_of(event: Event) -> str:
     return as_text(response_payload(event))
 
 
+#: Payload keys an instrumentor may write a model's private reasoning to. The
+#: names track the provider vocabularies: OpenAI's ``reasoning``/``thinking``,
+#: Anthropic's ``thinking``, and the generic ``reasoning_content`` that several
+#: gateways use. Ordered most-specific first.
+REASONING_KEYS: tuple[str, ...] = (
+    "reasoning",
+    "reasoning_content",
+    "thinking",
+    "thought",
+)
+
+
+def reasoning_text_of(event: Event) -> str:
+    """The reasoning trace captured on *event*, or ``""`` if there is none.
+
+    Separate from :func:`response_text_of` because a reasoning trace and an
+    answer are different evidentiary objects. A number stated while thinking is
+    a claim the module should check against the same evidence as a number
+    stated in the answer — models routinely "revise" a figure mid-thought and
+    the abandoned figure is exactly the kind of thing a reader never sees.
+
+    Empty today: no instrumenter writes these keys, so this is a no-op until the
+    capture layer (``S1``) does. It is here so that closing that gap is a
+    capture change and not a module change, and so the reasoning a *provider*
+    does return stops being silently dropped the day someone starts recording
+    it.
+    """
+    payload = event.payload
+    for key in REASONING_KEYS:
+        value = payload.get(key)
+        if value:
+            return as_text(value)
+    # Providers nest the trace beside the message rather than beside the
+    # payload (``{"response": {"message": {"thinking": ...}}}``).
+    for outer in ("response", "message", "choices"):
+        nested = payload.get(outer)
+        if not isinstance(nested, dict):
+            continue
+        for inner in ("message", *REASONING_KEYS):
+            candidate = nested.get(inner)
+            if isinstance(candidate, dict):
+                for key in REASONING_KEYS:
+                    if candidate.get(key):
+                        return as_text(candidate[key])
+        for key in REASONING_KEYS:
+            if nested.get(key):
+                return as_text(nested[key])
+    return ""
+
+
 def as_text(value: object) -> str:
     """Render a captured value as text without inventing structure."""
     if value is None:
@@ -238,8 +288,10 @@ def as_text(value: object) -> str:
 
 __all__ = [
     "DEFAULT_MAX_EVENTS",
+    "REASONING_KEYS",
     "SessionView",
     "as_text",
+    "reasoning_text_of",
     "response_payload",
     "response_text_of",
 ]

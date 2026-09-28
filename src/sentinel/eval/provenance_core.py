@@ -54,6 +54,10 @@ class ClaimKind(StrEnum):
     SET = "set"
     ENTITY = "entity"
     COMPARATIVE = "comparative"
+    #: A count over a named set ("2 of 3 checks passed"). The denominator is the
+    #: part that carries the finding: a count smaller than what the source
+    #: enumerates is how cherry-picking announces itself.
+    RATIO = "ratio"
     VAGUE = "vague"
 
 
@@ -67,6 +71,8 @@ class ValueKind(StrEnum):
     MEMBER = "member"
     ENTITY = "entity"
     TEXT = "text"
+    #: ``number``/``denominator``: a counted subset of a counted whole.
+    RATIO = "ratio"
 
 
 #: Kinds a claim must land in to be checkable against evidence. Anything else is
@@ -81,6 +87,7 @@ CHECKABLE_KINDS = frozenset(
         ClaimKind.SET,
         ClaimKind.ENTITY,
         ClaimKind.COMPARATIVE,
+        ClaimKind.RATIO,
     }
 )
 
@@ -297,6 +304,10 @@ class Value:
     members: tuple[str, ...] = ()
     negated: bool = False
     raw: str = ""
+    #: ``(numerator, denominator)`` for :attr:`ValueKind.RATIO` — "2 of 3".
+    #: The denominator is the field the cherry-picking rule compares against the
+    #: number of items the source actually enumerates.
+    ratio: tuple[Decimal, Decimal] | None = None
 
     def same_magnitude(self, other: Value, *, tolerance: Decimal | None = None) -> bool:
         """Whether two numbers are equal after unit normalization.
@@ -336,6 +347,9 @@ class Value:
         """
         if self.kind is ValueKind.MEMBER and self.members:
             body = ", ".join(self.members)
+        elif self.ratio is not None:
+            left, right = (_render_number(part) for part in self.ratio)
+            body = f"{left} of {right}"
         elif self.number is not None:
             number = _render_number(self.number)
             body = f"{number} {self.unit}".strip() if self.unit else number
@@ -377,6 +391,10 @@ class Claim:
     cue: str = ""
     index: int = 0
     terms: tuple[str, ...] = ()
+    #: The source the claim *names* ("the filing", "the API"), when it names
+    #: one. Set from :attr:`GroundingLexicon.ATTRIBUTIVE`; empty when the claim
+    #: asserts content without claiming to have read anything (``S3-T8``).
+    source_attributed: str = ""
 
     @property
     def is_checkable(self) -> bool:
@@ -430,6 +448,67 @@ class GroundingLexicon:
         "as of now": ValueKind.DATE,
     }
 
+    #: Verbs that make a noun phrase an *authority the model is reporting from*
+    #: ("the filing states", "the API returned"). A closed set on purpose: an
+    #: open-ended verb list would start claiming every past-tense verb is a
+    #: citation, and a lexicon that over-fires teaches operators to ignore it.
+    ATTRIBUTIVE_VERBS: tuple[str, ...] = (
+        "says",
+        "said",
+        "reports",
+        "reported",
+        "shows",
+        "showed",
+        "indicates",
+        "indicated",
+        "states",
+        "stated",
+        "confirms",
+        "confirmed",
+        "returns",
+        "returned",
+        "lists",
+        "listed",
+        "finds",
+        "found",
+        "contains",
+        "contained",
+        "reads",
+        "notes",
+        "noted",
+        "documents",
+        "documented",
+        "specifies",
+        "specified",
+        "records",
+        "recorded",
+    )
+
+    #: Prepositions that introduce a source *as the authority for what follows*.
+    #: Split from the weak list because they license a bare proper noun
+    #: ("according to Acme") where the weak ones require a "the <noun>" phrase
+    #: ("based on the report") — "in Paris" must not read as a citation.
+    ATTRIBUTIVE_STRONG: tuple[str, ...] = (
+        "according to",
+        "per",
+        "citing",
+        "as reported in",
+        "as shown in",
+        "as stated in",
+        "as listed in",
+        "as described in",
+        "as documented in",
+    )
+
+    #: Weaker introducers. These need the determiner: they also open ordinary
+    #: prose ("from the results of the migration" is attribution, "in 2023" is
+    #: a date).
+    ATTRIBUTIVE_WEAK: tuple[str, ...] = (
+        "based on",
+        "from",
+        "in",
+    )
+
     def __init__(self, phrases: Mapping[str, ValueKind] | None = None) -> None:
         """Create a lexicon over *phrases*, defaulting to :attr:`DEICTIC`."""
         self._phrases = dict(phrases if phrases is not None else self.DEICTIC)
@@ -446,9 +525,214 @@ class GroundingLexicon:
             return phrase, self._phrases[phrase]
         return None
 
+    def attribution(self, text: str) -> str:
+        """The source *text* names, or ``""`` if it names none.
+
+        Two shapes, both closed:
+
+        * ``<source> <attributive verb>`` — "the filing states", "the API
+          returned 3". The noun phrase is the source.
+        * ``<strong|weak introducer> <source>`` — "according to the Q3
+          report", "based on the audit". The introducer is the signal and the
+          noun phrase is again the source.
+
+        Returning the source (not just a boolean) is what lets a finding say
+        *which* document the model claims to have read, which is the difference
+        between a reviewer actioning the flag and shrugging at it.
+        """
+        verb = _attribution_by_verb(text)
+        if verb:
+            return verb
+        return _attribution_by_preposition(text, self)
+
 
 #: The shared default lexicon.
 DEFAULT_LEXICON = GroundingLexicon()
+
+
+# ---------------------------------------------------------------------------
+# attribution: which source a claim says it read (``S3-T8``)
+# ---------------------------------------------------------------------------
+
+
+def _noun_phrase_pattern(*, proper_noun: bool = True) -> str:
+    """A short noun phrase, determiner-led or proper-noun.
+
+    The proper-noun branch is wrapped in ``(?-i:...)`` deliberately. These
+    patterns compile with :data:`re.IGNORECASE`, which would otherwise apply to
+    ``[A-Z]`` too and make it match any lowercase word — so "costs $49 *per
+    month*" reads as an attribution to "month", and every rate, duration and
+    unit in the corpus would look like a cited source.
+    """
+    determiner = r"the\s+[a-z][\w\-]*(?:\s+(?:[a-z][\w\-]*|of|for|and)){0,3}"
+    if not proper_noun:
+        return determiner
+    return determiner + r"|(?-i:[A-Z][\w&.]*(?:\s+[A-Z][\w&.]*){0,2})"
+
+
+#: "<source> <attributive verb>" — the model reporting what a source said.
+_ATTRIBUTION_BY_VERB_RE = re.compile(
+    r"(?<![a-z0-9])(?P<source>"
+    + _noun_phrase_pattern()
+    + r")\s+(?:"
+    + "|".join(GroundingLexicon.ATTRIBUTIVE_VERBS)
+    + r")\b",
+    re.IGNORECASE,
+)
+
+#: "<introducer> <source>" — the source offered as the authority. Strong
+#: introducers accept a bare proper noun; weak ones require the determiner.
+_ATTRIBUTION_STRONG_RE = re.compile(
+    r"\b(?:"
+    + "|".join(re.escape(cue) for cue in GroundingLexicon.ATTRIBUTIVE_STRONG)
+    + r")\s+(?P<source>"
+    + _noun_phrase_pattern()
+    + r")\b",
+    re.IGNORECASE,
+)
+
+_ATTRIBUTION_WEAK_RE = re.compile(
+    r"\b(?:"
+    + "|".join(re.escape(cue) for cue in GroundingLexicon.ATTRIBUTIVE_WEAK)
+    + r")\s+(?P<source>"
+    + _noun_phrase_pattern(proper_noun=False)
+    + r")\b",
+    re.IGNORECASE,
+)
+
+#: Words that make a noun phrase a *thing being discussed* rather than an
+#: authority being cited. "The migration report shows the rate doubled" is the
+#: model reasoning about a document; "the report shows the rate doubled" is the
+#: model quoting it. Without this the weak introducers would fire on the first.
+_NON_SOURCE_HEADS = frozenset(
+    {
+        "migration",
+        "user",
+        "review",
+        "change",
+        "issue",
+        "bug",
+        "update",
+        "request",
+        "response",
+        "example",
+        "test",
+        "trial",
+        "conversation",
+        "log",
+        "history",
+        "changelog",
+    }
+)
+
+
+def _attribution_by_verb(text: str) -> str:
+    """The source named by a ``<source> <verb>`` shape, or ``""``."""
+    for match in _ATTRIBUTION_BY_VERB_RE.finditer(text):
+        source = match.group("source").strip()
+        if _is_source_phrase(source):
+            return source
+    return ""
+
+
+def _attribution_by_preposition(text: str, lexicon: GroundingLexicon) -> str:
+    """The source named by an ``<introducer> <source>`` shape, or ``""``."""
+    for pattern in (_ATTRIBUTION_STRONG_RE, _ATTRIBUTION_WEAK_RE):
+        for match in pattern.finditer(text):
+            source = match.group("source").strip()
+            if _is_source_phrase(source):
+                return source
+    del lexicon  # the phrase sets live on the instance for customisation
+    return ""
+
+
+#: Leading determiners stripped before the head-noun test, so "the migration
+#: report" is judged on "migration" rather than on "the".
+_DETERMINERS = frozenset({"the", "a", "an", "this", "that", "these", "those", "our", "your"})
+
+
+def _is_source_phrase(source: str) -> bool:
+    """Whether *source* reads as a citable authority.
+
+    Rejects "the user says" and "the test shows": a person or a test is not a
+    source the model could have fabricated a citation to, and flagging those
+    would be noise. So does "the migration report showed growth" — the model is
+    reasoning *about* the report, not quoting it.
+    """
+    words = normalize_text(source).split()
+    while words and words[0] in _DETERMINERS:
+        words.pop(0)
+    return bool(words) and words[0] not in _NON_SOURCE_HEADS
+
+
+#: A counted subset of a counted whole, with the noun that makes it one:
+#: "2 of 3 checks", "4/12 findings", "2 out of 5 samples".
+_RATIO_RE = re.compile(
+    r"\b(?P<num>\d+)\s*(?:of|out of|/)\s*(?P<den>\d+)\s+"
+    r"(?P<noun>[A-Za-z]{3,}(?:s|es))\b",
+    re.IGNORECASE,
+)
+
+#: A count is only checkable against an *enumeration* the reader can count too.
+#: Below this, "3 of 4 items" is indistinguishable from a number that happens to
+#: be followed by a plural noun.
+_MIN_ENUMERATED_SIBLINGS = 3
+
+#: Sibling identifiers in tool output: ``check_1``, ``error-2``, ``test3``. The
+#: stem is what makes them one enumeration rather than an incidental collision,
+#: which is why the count is taken per stem and the biggest stem wins.
+_SIBLING_ID_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<stem>[A-Za-z][A-Za-z]{1,20}?)[_-](?P<index>\d{1,4})(?![0-9A-Za-z])"
+)
+
+
+def _sibling_count(text: str) -> int:
+    """How many siblings the largest ``stem_<n>`` family in *text* has."""
+    families: dict[str, set[int]] = {}
+    for match in _SIBLING_ID_RE.finditer(text):
+        families.setdefault(normalize_text(match.group("stem")), set()).add(
+            int(match.group("index"))
+        )
+    return max((len(members) for members in families.values()), default=0)
+
+
+def _enumerated_count(text: str) -> int:
+    """How many discrete items the evidence enumerates.
+
+    Two independent shapes, and the larger answer wins:
+
+    * sibling identifiers — ``check_1 .. check_4``;
+    * labelled items — ``alpha: pass, beta: fail`` (the existing
+      :data:`_KEY_VALUE_RE` shapes), counted by distinct label.
+
+    Both need at least :data:`_MIN_ENUMERATED_SIBLINGS` items before they count
+    as an enumeration. The floor is the false-positive guard: without it, any
+    two stray numbers with a shared stem would "contradict" a count.
+    """
+    best = _sibling_count(text)
+    labels: set[str] = set()
+    for value in _key_values(text):
+        labels.add(value.canonical)
+    if len(labels) >= _MIN_ENUMERATED_SIBLINGS:
+        best = max(best, len(labels))
+    return best
+
+
+def _raw_numbers(text: str) -> set[Decimal]:
+    """Every plain number in *text*, scanned without claim interpretation.
+
+    Deliberately not :func:`extract_values`: that masks ``key:`` prefixes, which
+    is right for reading tool output as prose but would hide the "20" in
+    ``Seats used: 12 of 20.`` — and a verbatim check that cannot see the number
+    the tool actually printed is not a verbatim check.
+    """
+    found: set[Decimal] = set()
+    for match in _NUMBER_RE.finditer(text):
+        raw = match.group("amount") or match.group("plain")
+        number = _to_decimal(raw) if raw else None
+        if number is not None:
+            found.add(number)
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +905,10 @@ class RuleBasedClaimExtractor:
         if comparative is not None:
             return comparative
 
+        ratio = self._match_ratio(fragment)
+        if ratio is not None:
+            return self._claim(claim_id, fragment, ClaimKind.RATIO, ratio, "ratio", index)
+
         if implicit:
             phrase, kind = self._lexicon.reference(fragment) or ("", ValueKind.TEXT)
             return Claim(
@@ -631,6 +919,7 @@ class RuleBasedClaimExtractor:
                 cue=f"implicit:{phrase}",
                 index=index,
                 terms=_terms(fragment),
+                source_attributed=self._lexicon.attribution(fragment),
             )
 
         number = self._match_number(fragment, allow_units=_COUNT_UNITS)
@@ -702,6 +991,32 @@ class RuleBasedClaimExtractor:
             cue=cue,
             index=index,
             terms=_terms(fragment),
+            source_attributed=self._lexicon.attribution(fragment),
+        )
+
+    def _match_ratio(self, fragment: str) -> Value | None:
+        """A counted subset of a counted whole: "2 of 3 checks passed".
+
+        The trailing noun is required. "2 of 3" on its own is ambiguous enough
+        (a score, a version, a date range) that treating it as a checkable count
+        would be a guess, and a guess here becomes a false positive. Requiring
+        the noun means the rule stays silent on anything it cannot reason about.
+        """
+        match = _RATIO_RE.search(fragment)
+        if match is None:
+            return None
+        numerator = _to_decimal(match.group("num"))
+        denominator = _to_decimal(match.group("den"))
+        if numerator is None or denominator is None or denominator == 0:
+            return None
+        if numerator > denominator:
+            return None
+        return Value(
+            kind=ValueKind.RATIO,
+            canonical=f"{_render_number(numerator)} of {_render_number(denominator)}",
+            number=numerator,
+            ratio=(numerator, denominator),
+            raw=match.group(0),
         )
 
     def _match_membership(self, fragment: str) -> Value | None:
@@ -1063,6 +1378,10 @@ class Verdict(StrEnum):
     IMPLIED = "implied"
     #: The evidence states something incompatible with the claim.
     CONFLICTED = "conflicted"
+    #: The claim names a source it never cited, and the evidence is silent.
+    #: Narrower than :attr:`UNKNOWN`, and only reachable when the session
+    #: actually records citations (see :attr:`DiffContext.citations_recorded`).
+    UNSOURCED = "unsourced"
     #: The evidence is silent. For a specific claim this is a real finding.
     UNKNOWN = "unknown"
 
@@ -1079,6 +1398,8 @@ class SupportKind(StrEnum):
     EXCLUSION = "exclusion"
     NEGATION = "negation"
     DISAGREEMENT = "disagreement"
+    #: The claim's counted denominator is smaller than the source's item count.
+    CHERRY_PICK = "cherry_pick"
     NONE = "none"
 
 
@@ -1154,7 +1475,11 @@ class DiffResult:
     @property
     def is_finding(self) -> bool:
         """Whether this verdict should become a flag at all."""
-        return self.verdict in (Verdict.CONFLICTED, Verdict.UNKNOWN)
+        return self.verdict in (
+            Verdict.CONFLICTED,
+            Verdict.UNSOURCED,
+            Verdict.UNKNOWN,
+        )
 
 
 @dataclass
@@ -1166,11 +1491,22 @@ class DiffContext:
     stronger signal than an uncited one. ``context`` is the wider tool output
     the response had available. ``implied`` holds lexicon-resolved references
     (for example a deictic phrase and the date evidence offers for it).
+
+    ``citations_recorded`` is a statement about the *instrumentation*, not the
+    response: does this session record :attr:`~sentinel.models.events.RefKind.
+    GROUNDS` refs anywhere at all? Without it, "this response cites nothing"
+    is indistinguishable from "this framework never emits citations", and a
+    fabricated source would be unprovable. With it set, a claim that *names* a
+    source while citing none becomes :attr:`Verdict.UNSOURCED` rather than a
+    vague :attr:`Verdict.UNKNOWN`. It is a session-level fact because one
+    response citing nothing says little and a whole session citing nothing says
+    almost nothing.
     """
 
     explicit: tuple[str, ...] = ()
     context: tuple[str, ...] = ()
     implied: Mapping[str, str] = field(default_factory=dict)
+    citations_recorded: bool = False
 
     @property
     def all_text(self) -> str:
@@ -1199,6 +1535,9 @@ def diff_claim(claim: Claim, context: DiffContext) -> DiffResult:
     value = claim.value
     if value is None or not claim.is_checkable:
         return DiffResult(verdict=Verdict.UNKNOWN, detail="claim is not checkable")
+
+    if value.kind is ValueKind.RATIO and value.ratio is not None:
+        return _diff_ratio(value, context)
 
     explicit_values = _values_of(context.explicit)
     context_values = _values_of(context.context)
@@ -1250,7 +1589,19 @@ def diff_claim(claim: Claim, context: DiffContext) -> DiffResult:
     if conflict is not None:
         return conflict
 
-    # 5. silence
+    # 5. named but never cited
+    #
+    # Deliberately *last*. Every rule that can find support has already run, so
+    # this verdict can only ever reclassify a claim that was going to be
+    # flagged as ungrounded anyway — it can never turn silence into a new flag.
+    # That ordering is the whole false-positive argument for this feature: the
+    # attribution patterns are allowed to be generous, because a wrong match
+    # costs a category label, not a flag an operator has to triage.
+    unsourced = _unsourced(claim, context)
+    if unsourced is not None:
+        return unsourced
+
+    # 6. silence
     if not context.has_evidence:
         return DiffResult(
             verdict=Verdict.UNKNOWN,
@@ -1259,6 +1610,113 @@ def diff_claim(claim: Claim, context: DiffContext) -> DiffResult:
     return DiffResult(
         verdict=Verdict.UNKNOWN,
         detail="available tool output does not mention the claimed value",
+    )
+
+
+def _unsourced(claim: Claim, context: DiffContext) -> DiffResult | None:
+    """The claim names a source it never cited (``S3-T8``).
+
+    Returns ``None`` unless all of the following hold, because a fabricated
+    citation has to be *provable* from the log:
+
+    * the claim names a source at all (no name, no claim of having read it);
+    * the session records :attr:`~sentinel.models.events.RefKind.GROUNDS` refs
+      somewhere — otherwise "this response cited nothing" is indistinguishable
+      from a framework that never emits citations, and the whole rule would be
+      guessing;
+    * this response cited nothing, having had the chance to;
+    * the evidence is silent, so there is no support to defer to.
+    """
+    if not claim.source_attributed:
+        return None
+    if not context.citations_recorded:
+        return None
+    if context.explicit:
+        return None
+    if not context.has_evidence:
+        detail = (
+            f"attributed to {claim.source_attributed} but no source was consulted "
+            f"or cited in this turn"
+        )
+    else:
+        detail = (
+            f"attributed to {claim.source_attributed} but the response cites no "
+            f"tool result, and the available output does not support the claim"
+        )
+    return DiffResult(
+        verdict=Verdict.UNSOURCED,
+        detail=detail,
+        observed=claim.source_attributed,
+    )
+
+
+def _diff_ratio(value: Value, context: DiffContext) -> DiffResult:
+    """Check a counted subset against the items the source enumerates.
+
+    A count is a statement about a *set*, so what matters is whether the set
+    the agent counted over is the set the source described. Three ways that can
+    end, in this order:
+
+    1. the source enumerates **more** items than the claim's denominator — the
+       agent counted a subset and reported it as the whole, which is what
+       cherry-picking looks like when it is written down;
+    2. the source states both numbers verbatim — the count was copied, not
+       computed, and there is nothing to second-guess. Without this, ordinary
+       prose like "12 of 20 seats" would be reported as uncheckable noise;
+    3. otherwise the count could not be checked at all.
+
+    The enumeration is read from *cited* evidence when the response cited
+    anything, matching the rest of the module: a count is a statement about the
+    sources the agent says it read, not about every result that happened to be
+    in the turn.
+    """
+    numerator, denominator = value.ratio or (Decimal(0), Decimal(0))
+    canonical = value.render()
+    if not context.has_evidence:
+        return DiffResult(
+            verdict=Verdict.UNKNOWN,
+            detail="no tool output available to ground the count",
+        )
+
+    counted = _enumerated_count(
+        " \n ".join(context.explicit) if context.explicit else context.all_text
+    )
+    if counted > denominator:
+        return DiffResult(
+            verdict=Verdict.CONFLICTED,
+            support_kind=SupportKind.CHERRY_PICK,
+            detail=(
+                f"reports {canonical} but the source enumerates {counted} items, "
+                f"so at least {counted - int(denominator)} were left out"
+            ),
+            cited=bool(context.explicit),
+            # ``matched_value`` is what a reviewer reads as the evidence's
+            # counter-statement, so it carries the enumeration, not the claim.
+            matched_value=f"{counted} items",
+            observed=str(counted),
+        )
+    if counted == denominator:
+        return DiffResult(
+            verdict=Verdict.SUPPORTED,
+            support_kind=SupportKind.EXPLICIT,
+            detail=f"source enumerates {counted} items, matching the claimed count",
+            cited=bool(context.explicit),
+            matched_value=canonical,
+            observed=canonical,
+        )
+    stated = _raw_numbers(context.all_text)
+    if numerator in stated and denominator in stated:
+        return DiffResult(
+            verdict=Verdict.SUPPORTED,
+            support_kind=SupportKind.EXPLICIT,
+            detail=f"source states {canonical} verbatim",
+            cited=bool(context.explicit),
+            matched_value=canonical,
+            observed=canonical,
+        )
+    return DiffResult(
+        verdict=Verdict.UNKNOWN,
+        detail=(f"the source does not enumerate a countable set, so {canonical} cannot be checked"),
     )
 
 
@@ -1762,6 +2220,133 @@ _CRITICAL_KINDS = frozenset({ClaimKind.NUMERIC, ClaimKind.BOOLEAN, ClaimKind.SET
 _HIGH_KINDS = frozenset({ClaimKind.DATE, ClaimKind.DURATION, ClaimKind.WEEKDAY})
 
 
+#: Domains where an ungrounded assertion costs more than an ungrounded price
+#: quote (``S3-T9``). Deliberately a small, closed set of *subject* terms: the
+#: escalation keys on what the claim is about, not on the phrasing, so it cannot
+#: be triggered or evaded by wording.
+#:
+#: The weight is a *floor*, not an override. A claim about a contraindication
+#: that the evidence contradicts is still exactly as bad as a claim about a
+#: contraindication the evidence never mentioned — the floor raises the quiet
+#: cases and leaves the loud ones alone.
+SAFETY_LEXICON: Mapping[str, Severity] = {
+    # safety
+    "medication": Severity.HIGH,
+    "dosage": Severity.HIGH,
+    "dose": Severity.HIGH,
+    "contraindication": Severity.HIGH,
+    "contraindicated": Severity.HIGH,
+    "allergy": Severity.HIGH,
+    "allergic": Severity.HIGH,
+    "side effect": Severity.HIGH,
+    "overdose": Severity.HIGH,
+    "mortality": Severity.HIGH,
+    "fatality": Severity.HIGH,
+    "toxicity": Severity.HIGH,
+    "toxic": Severity.HIGH,
+    "pregnan": Severity.HIGH,
+    "symptom": Severity.HIGH,
+    "diagnosis": Severity.HIGH,
+    "interaction": Severity.HIGH,
+    # legal / regulatory
+    "regulator": Severity.HIGH,
+    "regulatory": Severity.HIGH,
+    "litigation": Severity.HIGH,
+    "lawsuit": Severity.HIGH,
+    "attorney": Severity.HIGH,
+    "compliance": Severity.MEDIUM,
+    "certification": Severity.MEDIUM,
+    "certified": Severity.MEDIUM,
+    "certifications": Severity.MEDIUM,
+    "accreditation": Severity.MEDIUM,
+    "accredited": Severity.MEDIUM,
+    "licence": Severity.MEDIUM,
+    "license": Severity.MEDIUM,
+    "licensed": Severity.MEDIUM,
+    "permit": Severity.MEDIUM,
+    "sanction": Severity.MEDIUM,
+    "sanctions": Severity.MEDIUM,
+    "filing": Severity.MEDIUM,
+    "indemnity": Severity.MEDIUM,
+    "warranty": Severity.MEDIUM,
+    "hipaa": Severity.MEDIUM,
+    "gdpr": Severity.MEDIUM,
+    "iso 27001": Severity.MEDIUM,
+}
+
+#: Terms matched as stems, where English adds a suffix that must still count:
+#: ``medications``/``medicated``, ``compliant``/``compliance``, ``symptoms``.
+#: Terms matched as stems, where English adds a suffix that must still count:
+#: ``medications``, ``contraindicated``, ``pregnancy``, ``compliance``.
+#: The key is the lexicon term; the value is the suffix pattern to append, or
+#: ``""`` when the term is already complete (``hipaa``) or is a phrase whose
+#: words are matched individually.
+_SAFETY_STEMS: Mapping[str, str] = {
+    "medication": r"\w*",
+    "dosage": r"\w*",
+    "contraindication": r"\w*",
+    "contraindicated": "",
+    "allergy": r"\w*",
+    "allergic": "",
+    "pregnan": r"\w*",
+    "diagnosis": r"\w*",
+    "interaction": r"\w*",
+    "toxicity": "",
+    "regulator": r"\w*",
+    "regulatory": "",
+    "litigation": "",
+    "lawsuit": r"\w*",
+    "compliance": r"\w*",
+    "certification": r"\w*",
+    "certifications": r"\w*",
+    "certified": "",
+    "accreditation": r"\w*",
+    "accredited": "",
+    "sanction": r"\w*",
+    "sanctions": r"\w*",
+    "filing": r"\w*",
+    "licensed": "",
+    "symptom": r"\w*",
+}
+
+
+def _build_safety_patterns() -> tuple[tuple[Severity, re.Pattern[str]], ...]:
+    """Compile :data:`SAFETY_LEXICON` into one word-boundary pattern per weight.
+
+    Built rather than hand-written so the lexicon stays a readable mapping and
+    a new term cannot be added with a regex bug: each entry is escaped, given
+    the suffix from :data:`_SAFETY_STEMS`, and wrapped in word boundaries.
+    Multi-word terms ("side effect", "iso 27001") require whitespace between
+    their words, so they cannot match across an unrelated pair.
+    """
+    grouped: dict[Severity, list[str]] = {}
+    for term, weight in SAFETY_LEXICON.items():
+        body = r"\s+".join(re.escape(word) for word in term.split())
+        stem = _SAFETY_STEMS.get(term, r"\w*")
+        grouped.setdefault(weight, []).append(rf"{body}{stem}")
+    return tuple(
+        (weight, re.compile(r"\b(?:" + "|".join(sorted(terms)) + r")\b", re.IGNORECASE))
+        for weight, terms in sorted(grouped.items(), key=lambda item: item[0].rank, reverse=True)
+    )
+
+
+_SAFETY_FLOOR_PATTERNS = _build_safety_patterns()
+
+
+def _safety_floor(claim: Claim) -> Severity:
+    """The severity *claim*'s subject demands, or ``INFO`` if it is ordinary.
+
+    A floor, because the alternative — treating a safety claim as critical
+    whatever the verdict — would make the severity field useless for triage: a
+    module that cries wolf at the same volume stops being read.
+    """
+    floor = Severity.INFO
+    for weight, pattern in _SAFETY_FLOOR_PATTERNS:
+        if pattern.search(claim.text):
+            floor = _max_severity(floor, weight)
+    return floor
+
+
 def severity_for(claim: Claim, diff: DiffResult) -> Severity:
     """Map an analysis to a severity.
 
@@ -1773,6 +2358,21 @@ def severity_for(claim: Claim, diff: DiffResult) -> Severity:
         return Severity.INFO
 
     contradicted = diff.verdict is Verdict.CONFLICTED
+    if diff.support_kind is SupportKind.CHERRY_PICK:
+        # Reporting a favourable count over a set the source shows was larger is
+        # a misrepresentation, not a rounding error, whatever the claim's kind.
+        return Severity.HIGH
+    severity = _kind_severity(claim, contradicted)
+    return _max_severity(severity, _safety_floor(claim))
+
+
+def _max_severity(left: Severity, right: Severity) -> Severity:
+    """The more serious of two severities."""
+    return left if left.rank >= right.rank else right
+
+
+def _kind_severity(claim: Claim, contradicted: bool) -> Severity:
+    """The severity *claim*'s kind and verdict earn, before domain weighting."""
     if claim.kind in _CRITICAL_KINDS:
         base = Severity.HIGH if contradicted else Severity.MEDIUM
     elif claim.kind in _HIGH_KINDS:
@@ -1782,7 +2382,7 @@ def severity_for(claim: Claim, diff: DiffResult) -> Severity:
     else:
         base = Severity.INFO
     if contradicted and claim.cue.startswith("comparative"):
-        return Severity.MEDIUM
+        return _max_severity(Severity.MEDIUM, _safety_floor(claim))
     return base
 
 
@@ -1820,6 +2420,7 @@ def confidence_for(claim: Claim, diff: DiffResult, context: DiffContext) -> floa
         Verdict.SUPPORTED: 0.95,
         Verdict.IMPLIED: 0.8,
         Verdict.CONFLICTED: 0.9,
+        Verdict.UNSOURCED: 0.75,
         Verdict.UNKNOWN: 0.6,
     }[diff.verdict]
     if diff.support_kind is SupportKind.ROUNDING:
