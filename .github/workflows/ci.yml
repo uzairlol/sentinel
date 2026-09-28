@@ -32,7 +32,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
-      - run: uv sync --group dev --extra langchain --extra langgraph
+      # --extra postgres on purpose: without it sqlalchemy is absent and
+      # src/sentinel/store/models.py fails as "Cannot find implementation or
+      # library", so the store's ORM layer was never actually type-checked
+      # here. pyproject's mypy override for asyncpg is a local-dev concession,
+      # not a substitute for checking these for real.
+      - run: uv sync --group dev --extra langchain --extra langgraph --extra postgres
       - run: uv run mypy
 
   test:
@@ -72,11 +77,20 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-          --volume "${{ github.workspace }}/deploy/roles.sql:/docker-entrypoint-initdb.d/10-roles.sql:ro"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
       - run: uv sync --group dev --extra postgres
+      - name: Provision least-privilege roles
+        # Not a docker-entrypoint-initdb.d volume: service containers are
+        # created *before* any step runs, so the workspace is still empty and
+        # Docker silently mounts a directory where the file was expected (the
+        # container then dies with "could not read from input file: Is a
+        # directory"). Piping the checked-out file in via psql is explicit and
+        # fails loudly. roles.sql is idempotent and tolerates a missing schema.
+        run: |
+          docker exec -i ${{ job.services.postgres.id }} \
+            psql -v ON_ERROR_STOP=1 -U sentinel -d sentinel_test < deploy/roles.sql
       - name: Run Postgres adapter integration tests
         # Coverage is on here, not just tests: this is the only job that can
         # execute the Postgres store, so it is also the only one that can gate
@@ -125,6 +139,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
       - run: uv sync --group dev --extra postgres
+      - name: Apply schema
+        # The service container starts empty, and this job runs only the load
+        # test -- no migration test to bring the schema into being. Without
+        # this the gate dies on `relation "tombstones" does not exist` before
+        # it measures anything.
+        run: uv run alembic upgrade head
+        env:
+          SENTINEL_STORE_DSN: postgresql://sentinel:sentinel@localhost:5432/sentinel_test
       - name: Run 1M-event losslessness gate
         run: uv run pytest tests/perf/test_losslessness.py -q --no-cov
         env:

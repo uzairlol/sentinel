@@ -51,13 +51,39 @@ Sprint `S3` — Tool-Use Grounding & Provenance. First evaluator module.
 
 ### Fixed
 
+- **CI was red on `main`, and had been since `S2`.** The first push of the `S2`
+  tail and all of `S3` exposed four defects that no local run could catch,
+  because every one of them lives in the workflow rather than the code:
+  - `deploy/roles.sql` was mounted into the Postgres service container via
+    `docker-entrypoint-initdb.d`. Service containers are created *before* any
+    step runs, so the workspace was still empty, Docker silently mounted a
+    directory where the file was expected, and the container died with
+    `could not read from input file: Is a directory` — taking the whole
+    integration job with it. The file is now piped in through `psql` after
+    checkout, which fails loudly instead of mysteriously.
+  - The `load` job's service container starts with an empty schema and that job
+    runs only `test_losslessness.py`, so nothing ever created the tables: the
+    gate died on `relation "tombstones" does not exist` before measuring
+    anything. The job now applies the schema first.
+  - The `typecheck` job did not install the `postgres` extra, so `sqlalchemy`
+    was absent and `src/sentinel/store/models.py` failed as `Cannot find
+    implementation or library`. The store's ORM layer was never actually being
+    type-checked in CI. The job now installs the extra, which is what
+    `pyproject.toml`'s asyncpg override always claimed.
+  - `tests/integration/test_db_roles.py` imported `asyncpg` at module level, so
+    the offline test job — which installs no database driver — aborted
+    collection of the entire suite, not just that module. Now collected through
+    `pytest.importorskip`, matching the other integration modules.
+- `deploy/roles.sql` is now idempotent, resolves the database with
+  `current_database()` instead of hardcoding `sentinel` (so one file provisions
+  both the compose stack and CI's `sentinel_test`), and skips the reviewer's
+  column grant when `flags` does not exist yet instead of erroring.
 - Migration `0002_flags_s3` could not run on Postgres at all: it issued a
   column-scoped `ALTER DEFAULT PRIVILEGES`, which PostgreSQL rejects with
   `default privileges cannot be set for columns`, aborting `alembic upgrade`
-  before any column was added. **The `integration-postgres` CI job has been
-  failing since this sprint began**; S3 was never validated against Postgres
-  until now. The invalid statement is gone, and `deploy/roles.sql` no longer
-  carries the same error.
+  before any column was added. **The `integration-postgres` CI job could never
+  have passed while this was in place.** The invalid statement is gone, and
+  `deploy/roles.sql` no longer carries the same error.
 - New migration `0003_memory_entries` creates the memory adapter's table
   instead of the adapter running `CREATE TABLE` on first connect. Runtime DDL
   contradicted the role model in `deploy/roles.sql` (the writer has no

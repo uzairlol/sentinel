@@ -24,10 +24,15 @@ from __future__ import annotations
 
 import os
 
-import asyncpg
 import pytest
 
-from sentinel.models.events import SESSION_START, Event, new_event_id
+# asyncpg lives behind the optional "postgres" extra. Import it through pytest
+# so this module stays *collectable* in the offline job, which installs no
+# database driver: without this the module-level import aborts collection of
+# the whole suite before the skipif below can take effect.
+asyncpg = pytest.importorskip("asyncpg")
+
+from sentinel.models.events import SESSION_START, Event, new_event_id  # noqa: E402
 
 _WRITER = os.getenv("SENTINEL_ROLE_WRITER_DSN")
 _READER = os.getenv("SENTINEL_ROLE_READER_DSN")
