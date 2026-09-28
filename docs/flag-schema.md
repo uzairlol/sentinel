@@ -168,11 +168,21 @@ async def adjudicate_flag(self, flag_id, adjudication, *, adjudicated_by,
 | Role | On `flags` | Why |
 |---|---|---|
 | `sentinel_writer` | `INSERT`, `SELECT` | Evaluator workers write findings; append-only (ADR-0011). |
-| `sentinel_reviewer` | `INSERT`, `SELECT`, `UPDATE` | Reviewers adjudicate. `UPDATE` is the only mutation any app role holds. |
+| `sentinel_reviewer` | `SELECT`, `UPDATE` on `adjudication`, `adjudicated_by`, `adjudicated_at`, `auto_resolved` **only** | Reviewers adjudicate, and that is the whole of their power. No `INSERT` — a reviewer cannot manufacture a finding — and no `DELETE`, so a rejected finding stays on the record. |
 | `sentinel_reader` | `SELECT` | Replay, audit, reporting. |
 
-`UPDATE` is confined to adjudication columns by the protocol, not by the grant —
-the grant is the boundary, the protocol is the convention.
+The reviewer's `UPDATE` is granted at **column scope**, not table scope, so
+Postgres rejects any attempt to rewrite `summary`, `confidence`, `severity`, or
+`evidence`. Adjudicating a finding therefore cannot alter what the finding says.
+`tests/integration/test_db_roles.py::test_reviewer_may_only_adjudicate_flags`
+connects as the role and asserts both halves: all four adjudication columns can
+be written, while `INSERT` into `flags`, `DELETE FROM flags`, any write to
+`events`, and an `UPDATE` of `flags.summary` are all rejected with
+`permission denied`.
+
+`sentinel_writer` holds `INSERT, SELECT` and has `UPDATE`/`DELETE`/`TRUNCATE`/
+`REFERENCES`/`TRIGGER` revoked outright, so a live writer credential cannot
+rewrite or destroy evidence — see `S2-T3`.
 
 ## 8. Invariants
 

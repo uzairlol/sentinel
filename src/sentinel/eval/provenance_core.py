@@ -12,9 +12,9 @@ The layering mirrors the rule-first constraint in the design:
    find the claims. No model, no I/O, same input -> same claims.
 2. :class:`GroundingLexicon` (``S3-T7``) — the *implicit grounding* lexicon:
    the small closed set of phrases that name a fact without stating it
-   ("today", "the latest release", "currently"). A pluggable
-   :class:`ClaimClassifier` may add claims, but it must be deterministic and
-   bumping it is a module-version change.
+   ("today", "the latest release", "currently"). An alternative
+   :class:`ClaimExtractor` may find more claims, but it must be deterministic
+   and swapping one in is a module-version change.
 3. :func:`diff_claim` (``S3-T8``/``S3-T9``/``S3-T10``) — evidence vs claim:
    explicit citation, implication (rounding, unit conversion, subset), and
    contradiction (bounds, exclusion, negation, disagreeing weekday/date).

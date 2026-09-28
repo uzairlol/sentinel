@@ -1,0 +1,32 @@
+# Coverage gate for the code the offline unit gate cannot execute.
+#
+# The main `test` job runs without a database, so pyproject.toml's
+# [tool.coverage.run] omits these files from the 90% gate. Omitting is not the
+# same as ignoring: the `integration-postgres` CI job runs them against a real
+# database and enforces this config instead, so every line of shipped code is
+# still held to a threshold by the job that can actually exercise it.
+#
+# Measured with the Postgres 16 service container on 2026-09-28:
+#   store/postgres.py  94%   store/models.py 100%   memory/postgres.py 97%
+#
+# Use with:
+#   COVERAGE_RCFILE=.coveragerc.postgres uv run coverage run -m pytest ...
+#   COVERAGE_RCFILE=.coveragerc.postgres uv run coverage report
+
+[run]
+source =
+    src/sentinel/store
+    src/sentinel/memory
+branch = True
+
+[report]
+# Held below the 90% offline gate's actuals so the two jobs fail for
+# different reasons: this one catches a Postgres path losing its tests, not a
+# general drift in the codebase.
+fail_under = 90
+show_missing = True
+skip_covered = False
+include =
+    */store/postgres.py
+    */store/models.py
+    */memory/postgres.py

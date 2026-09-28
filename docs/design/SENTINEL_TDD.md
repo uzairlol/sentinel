@@ -291,7 +291,7 @@ See [`§2.11`](#211-gate-failure-protocol). Restated for emphasis: **a failed ga
 | `S0` | `0 → 5` | `[x]` | Passed | Vertical slice green on `main`: event envelope, session/raw-`instrument_ollama_call` capture, SQLite store, `sentinel replay` CLI, E2E vs respx-stubbed Ollama. 31 tests / 99.3% coverage, `mypy --strict` clean, `v0.0.2` tagged. |
 | `S1` | `5 → 15` | `[x]` | Passed | Instrumentation layer core green on `main`: event taxonomy + INV-3 refs, registry/config, capture worker (bounded queue, fail-open, redaction), LangChain + LangGraph + raw-Ollama/OpenAI-compat + generic `trace` + memory adapters, call-graph query helper. 115 tests / 95.3% coverage, `mypy --strict`/ruff/format/pre-commit clean, `v0.0.3` tagged. `S1-T15` sampling and `S1-T16` streaming caps deferred to `S2`. |
 | `S2` | `15 → 25` | `[x]` | Passed | Event store hardening green on `main`: Alembic migrations, Postgres store (batched append, streaming replay, call graph, session listing, health, gap detection, keyset retention prune with tombstones), SQLite/Postgres parity contract, 1M-event losslessness gate, truncation (`S1-T16`) + sampling (`S1-T15`), least-privilege DB roles + compose reference stack. 190 tests / 92.4% coverage, `mypy --strict`/ruff/bandit clean; `S2-T19` backup/restore smoke skips where `pg_dump`/`psql` are absent (runs in CI with tooling). |
-| `S3` | `25 → 35` | `[x]` | Passed | First detector green on `main`: universal `Flag` row (deterministic identity, typed evidence, first-write-wins adjudication, ADR-0012), `EvaluatorWorker` (checkpoints, retries, batching, `SessionView`, call graph), claim extraction + grounding lexicon, provenance diff (ungrounded/contradicted), review routing, 22-case adversarial corpus. **FP 0.00%, FN 0.00%** on the corpus via `sentinel eval-fixtures --module provenance`; 398 tests / 90.5% coverage (Postgres store measured by the integration job, not the offline gate), `mypy --strict`/ruff/bandit clean. Documented in [`docs/modules/provenance.md`](../modules/provenance.md) and [`docs/flag-schema.md`](../flag-schema.md). |
+| `S3` | `25 → 35` | `[~]` | Conditional | First detector green on `main`: universal `Flag` row (deterministic identity, typed evidence, first-write-wins adjudication, ADR-0012), `EvaluatorWorker` (checkpoints, retries, batching, `SessionView`, call graph), claim extraction + deictic grounding lexicon, contradiction diff with `observed_value` in evidence, review routing, 22-case adversarial corpus. **FP 0.00%, FN 0.00%** via `sentinel eval-fixtures --module provenance`; 400 offline tests at 91% coverage plus 114 integration tests (0 skipped) with the Postgres-only gate at 95% via `.coveragerc.postgres`, `mypy --strict`/ruff/bandit clean. **Conditional, not complete:** contradiction detection ships, fabricated *citations* and cherry-picked numbers do not — see "Known gaps carried out of `S3`". Docs: [`docs/modules/provenance.md`](../modules/provenance.md), [`docs/flag-schema.md`](../flag-schema.md). |
 | `S4` | `35 → 45` | `[ ]` | — | — |
 | `S5` | `45 → 55` | `[ ]` | — | — |
 | `S6` | `55 → 65` | `[ ]` | — | — |
@@ -700,25 +700,25 @@ A trustworthy, queryable, production-grade event store. This is the **MVP-ready 
 - [x] `S3-T4` (P1) Determinism requirement: same inputs + same module version → identical flags (needed for reproducible FP/FN and for replay).
 
 **Claim extraction**
-- [x] `S3-T5` (P0) Extraction pass over `llm.response` / reasoning traces: classify spans as `grounded_claim` (cites a tool/retrieval/source), `numeric_claim`, or `ungrounded`. Start rule/template-based, then a pluggable small-model classifier behind an interface.
-- [x] `S3-T6` (P0) Normalize each grounded claim to a structured form: `{claim_text, claimed_source, claimed_value?}`.
-- [x] `S3-T7` (P1) Handle "implicit grounding" language: "according to the document", "the search returned", "the API shows", etc. — a maintained lexicon with tests.
+- [~] `S3-T5` (P0) Extraction pass over `llm.response` / reasoning traces: classify spans as `grounded_claim` (cites a tool/retrieval/source), `numeric_claim`, or `ungrounded`. Start rule/template-based, then a pluggable small-model classifier behind an interface. **The rule/template extractor and the `ClaimExtractor` protocol both ship, and the seam is now covered by a test that injects a non-default extractor end to end.** Two gaps: extraction reads only `llm.response` (no reasoning/thinking trace is read — in fact none is captured anywhere, which is an `S1` capture gap), and the span taxonomy that shipped is `ClaimKind` (numeric/boolean/date/member/…) rather than the `grounded_claim`/`numeric_claim`/`ungrounded` classification this task specifies. No model-backed extractor exists; the protocol is the seam one would slot into.
+- [~] `S3-T6` (P0) Normalize each grounded claim to a structured form: `{claim_text, claimed_source, claimed_value?}`. **`claimed_value` and `claim_text` ship; `claimed_source` does not.** No per-claim record of the source the claim names, because nothing resolves a claim's wording to a specific tool call (see `S3-T8`). Tracked with `S3-T8`.
+- [~] `S3-T7` (P1) Handle "implicit grounding" language: "according to the document", "the search returned", "the API shows", etc. — a maintained lexicon with tests. **The lexicon that shipped is the *deictic* one** ("today", "the latest release", "currently", 21 phrases, tested). The *attribution* phrases this task names — "according to the document", "the search returned", "the API shows" — are **not implemented**. The two need different machinery: deictic phrases resolve against a value in the evidence, attribution phrases name a source that must be matched to a tool call.
 
 **Provenance diff**
-- [x] `S3-T8` (P0) `provenance_diff(session, claims, call_graph)`: for each claim, find the referenced tool call; if none exists → flag `ungrounded_claim`; if one exists but the returned value disagrees → flag `contradicted_claim` (with the actual observed value in evidence).
-- [x] `S3-T9` (P0) Severity mapping: ungrounded claim about a consequential value (money, legal, safety, quantity) escalates severity; default severity `medium`.
+- [~] `S3-T8` (P0) `provenance_diff(session, claims, call_graph)`: for each claim, find the referenced tool call; if none exists → flag `ungrounded_claim`; if one exists but the returned value disagrees → flag `contradicted_claim` (with the actual observed value in evidence). **The contradiction half is complete and tested** (7 corpus cases, per-claim diff, `observed_value` in evidence marked `countervailance`). **"Find the referenced tool call" is not implemented**: evidence is collected wholesale for the turn and a claim is ungrounded when no value anywhere in that turn matches, so there is no per-claim source→tool-call resolution and a citation to a tool that was never called cannot be detected. Ships as `gather_evidence` + `diff_claim`; there is no symbol named `provenance_diff`.
+- [~] `S3-T9` (P0) Severity mapping: ungrounded claim about a consequential value (money, legal, safety, quantity) escalates severity; default severity `medium`. **Money and quantity escalate; legal and safety are not modelled at all.** Escalation keys off the claim's *kind* (numeric/boolean/set outrank date/duration/weekday) and off the verdict (contradiction outranks ungrounded), not off a value-domain classifier, so a claim about a legal deadline or a safety limit carries no extra weight. The corpus spans all three bands — 5 `high`, 4 `medium`, 4 `low` — so the escalation does fire; it just has no notion of which *kind of consequence* is at stake.
 - [x] `S3-T10` (P1) Confidence estimation: combine extraction confidence and diff certainty; low-confidence flags are marked for human review rather than gated.
 - [x] `S3-T11` (P1) Make the whole path **reusable** as `sentinel.eval.provenance_core` so `S4` imports it (this is the shared mechanism noted in the design doc).
 
 **Adversarial fixtures & measurement**
-- [x] `S3-T12` (P0) Build a fixture corpus: **known-good** sessions (accurate citations) and **known-bad** sessions (fabricated citations, contradicted values, cherry-picked numbers). Store as replayable event sequences.
+- [~] `S3-T12` (P0) Build a fixture corpus: **known-good** sessions (accurate citations) and **known-bad** sessions (fabricated citations, contradicted values, cherry-picked numbers). Store as replayable event sequences. **22 replayable cases ship: 10 known-good and 12 known-bad, covering fabricated *values* and contradicted values. Two named categories are absent — fabricated *citations* (naming a source no tool returned) and cherry-picked numbers** (reporting a favourable figure from a result that also contains unflattering ones). Both are unimplemented detections as well as unimplemented fixtures, which is why adding the fixtures alone would break the FN gate. See the gap list below.
 - [x] `S3-T13` (P0) Harness: `sentinel eval-fixtures --module provenance` prints a confusion matrix; compute FP/FN rates.
 - [x] `S3-T14` (P0) Set a gate threshold: FP rate ≤ target (e.g. ≤ 5% on the corpus) and FN rate ≤ target (e.g. ≤ 10%) before the module is considered usable; otherwise tune.
 - [x] `S3-T15` (P1) Human-review routing: flags with confidence below threshold never gate, they queue for review (feeds `S7`).
 
 **Docs & integration**
 - [x] `S3-T16` (P1) `docs/modules/provenance.md`: methodology, severity model, FP/FN on the corpus, limitations.
-- [x] `S3-T17` (P1) Example: an agent prompted to fabricate a citation is caught end-to-end.
+- [~] `S3-T17` (P1) Example: an agent prompted to fabricate a citation is caught end-to-end. **The worked example and its test are real and green, but the scenario is a wrong value against a citation that genuinely happened** (`contradicted_price`, caught as `contradicted_claim` with `observed_value = "49 usd"`), not a citation to a source that was never called. It evidences the `S3-T8` contradiction path, not the fabricated-citation path this task names.
 
 #### Standards Focus
 
@@ -727,7 +727,7 @@ Flag/evidence schema design, worker idempotency, deterministic evaluators, adver
 #### Tests & Verification
 
 - [x] Unit: claim extraction on a labeled set; provenance diff on synthetic call graphs.
-- [x] Property: diff is deterministic and order-independent; no claim produces more than one primary flag.
+- [~] Property: diff is deterministic and order-independent; no claim produces more than one primary flag. *(Determinism and one-flag-per-claim are covered by example-based tests — two evaluator instances produce byte-identical flags, and `flag_id` equality is asserted across forced re-runs. There is no hypothesis-driven property test, and evidence order within a turn is not shuffled in any test, so order-independence is argued, not proven.)*
 - [x] Adversarial: every known-bad fixture is caught; no known-good fixture is flagged (or within the stated FP budget).
 - [x] Idempotency: running the worker twice yields identical flags, no duplicates.
 - [x] Evidence completeness: every flag references at least one real event ID.
@@ -737,10 +737,10 @@ Flag/evidence schema design, worker idempotency, deterministic evaluators, adver
 | # | Criterion | Verified by | Result |
 |---|---|---|---|
 | 1 | The flag schema is implemented, persisted, and documented | schema test + doc | Pass — [`docs/flag-schema.md`](../flag-schema.md), [`docs/adr/0012`](../adr/0012-flag-schema.md) |
-| 2 | Fabricated-citation and contradicted-value sessions are caught without manual intervention | adversarial tests | Pass — all 13 known-bad cases flagged |
-| 3 | FP ≤ 5%, FN ≤ 10% on the corpus (documented actual numbers) | `eval-fixtures` report | Pass — **FP 0.00%, FN 0.00%**, claim FP 0.00% on 22 cases |
+| 2 | Fabricated-citation and contradicted-value sessions are caught without manual intervention | adversarial tests | **Partial** — contradicted-value sessions are caught (7 corpus cases). A *fabricated citation* (naming a source no tool ever returned) is **not** detected: see the gap list below. |
+| 3 | FP ≤ 5%, FN ≤ 10% on the corpus (documented actual numbers) | `eval-fixtures` report | Pass — **FP 0.00%, FN 0.00%**, claim FP 0.00% on 22 cases. Meaningful only over the corpus that exists; it does not cover cherry-picked numbers. |
 | 4 | Worker is idempotent and restart-safe | idempotency test | Pass — re-running yields identical `flag_id`s, zero new rows |
-| 5 | `provenance_core` is a reusable, tested library boundary | code review | Pass — no reverse dependency on `sentinel.instrument` (INV-1 cold-subprocess test) |
+| 5 | `provenance_core` is a reusable, tested library boundary | code review | Pass — no reverse dependency on `sentinel.instrument` (INV-1 cold-subprocess test). No `S4` consumer exists yet; that is `S4`'s job, not a defect here. |
 | 6 | Every flag carries complete, valid evidence refs | test | Pass — non-empty, ULID-checked, role-typed, no duplicate pairs |
 
 #### Risks & Mitigations
@@ -756,16 +756,31 @@ Flag/evidence schema design, worker idempotency, deterministic evaluators, adver
 
 The flag schema, worker framework, and provenance core are now reusable by all later modules. `S4` reuses them directly.
 
-**Measured on the corpus** (`uv run sentinel eval-fixtures --module provenance`, 22 cases): 13 true positives, 0 false negatives, 0 false positives, 9 true negatives — case FP `0.00%`, FN `0.00%`, claim FP `0.00%`, against budgets of ≤ 5% FP and ≤ 10% FN. Rule-by-rule breakdown, the severity model, and the known blind spots are in [`docs/modules/provenance.md`](../modules/provenance.md).
+**Measured on the corpus** (`uv run sentinel eval-fixtures --module provenance`, 22 cases): 13 true positives, 0 false negatives, 0 false positives, 9 true negatives — case FP `0.00%`, FN `0.00%`, claim FP `0.00%`, against budgets of ≤ 5% FP and ≤ 10% FN. Rule-by-rule breakdown, the severity model, and the known blind spots are in [`docs/modules/provenance.md`](../modules/provenance.md). The numbers are exact for the corpus that exists; the corpus does not cover fabricated citations or cherry-picked numbers, so they do not bound the module's real-world error rate.
 
 #### GO / NO-GO Checklist
 
-- [x] All Exit Criteria rows pass.
-- [x] FP/FN measured and within budget on the corpus.
-- [x] The flag schema is declared stable (or an ADR records changes).
-- [x] Status Board updated: `S3` = `[x]`.
+- [~] All Exit Criteria rows pass. *(5 of 6 pass. Row 2 is partial: contradicted-value sessions are caught, fabricated *citations* are not — see the gap list.)*
+- [x] FP/FN measured and within budget on the corpus. *(FP 0.00%, FN 0.00% over 22 cases. The budget is met; the corpus is narrower than the task specified, so this is a weaker statement than it looks.)*
+- [x] The flag schema is declared stable (or an ADR records changes). *(ADR-0012, `schema_version = 0.1`.)*
+- [x] Status Board updated: `S3` = `[~]`.
 - [x] No open `gate-failure` issue.
-- [x] If FP/FN budgets are not met → **NO-GO**; do not proceed to memory integrity until the error rate is defensible. *(Budgets met: FP 0.00%, FN 0.00% — **GO**.)*
+- [x] If FP/FN budgets are not met → **NO-GO**; do not proceed to memory integrity until the error rate is defensible. *(Budgets met: FP 0.00%, FN 0.00%.)*
+
+**Verdict: CONDITIONAL GO.** The flag schema, worker framework, contradiction detection and measurement harness are real, tested against both stores, and meet their budgets. The module detects an agent contradicting its own tool output. It does **not** yet detect an agent citing a source it never consulted, which is the other half of the task's headline promise and the part `S3-T12`'s "fabricated citations" and "cherry-picked numbers" cases were supposed to prove. `S4` is unblocked — it reuses `provenance_core` and needs none of the missing machinery.
+
+#### Known gaps carried out of `S3`
+
+Ordered by how much they matter. None is a regression; all are absences.
+
+1. **No per-claim source resolution** (`S3-T6`, `S3-T8`, `S3-T12`, `S3-T17`). Evidence is gathered for the whole turn and matched by value, so there is no way to ask "which tool result was this claim about?". Consequence: a citation to a tool that was never called is invisible, `claimed_source` is not recorded, and the module cannot tell a selective report from a complete one.
+2. **No cherry-picked-number detection** (`S3-T12`). Reporting `2 of 3 passed` when the third failed is currently a silent miss, and the corpus has no case that would expose it.
+3. **No attribution lexicon** (`S3-T7`). Only deictic phrases resolve. "According to the document" is not recognised as a claim about a source at all.
+4. **No legal/safety severity weighting** (`S3-T9`). Severity follows claim kind and verdict; a wrong legal deadline ranks the same as a wrong meeting time.
+5. **No property tests** for order-independence, and no reasoning-trace extraction (`S3-T5`).
+6. **No `S4` consumer of `provenance_core`** yet. The Postgres store is no longer unmeasured: it is gated at 95% by the `integration-postgres` job via `.coveragerc.postgres`, and the `sentinel_reviewer` least-privilege role is now proven against a real database rather than asserted.
+
+**How to close this honestly:** items 1–2 are one feature (resolve each claim's named source to a tool call, then flag a claim whose source never returned anything). It should ship with corpus cases *and* a rule together, because adding the fixtures without the rule would immediately fail the FN gate. Items 3–5 are independent and smaller.
 
 ---
 

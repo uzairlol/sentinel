@@ -98,8 +98,9 @@ def _grant_reviewer() -> None:
         "GRANT UPDATE (adjudication, adjudicated_by, adjudicated_at, auto_resolved) "
         "ON flags TO sentinel_reviewer"
     )
-    op.execute(
-        "ALTER DEFAULT PRIVILEGES FOR ROLE sentinel_migrator IN SCHEMA public "
-        "GRANT UPDATE (adjudication, adjudicated_by, adjudicated_at, auto_resolved) "
-        "ON TABLES TO sentinel_reviewer"
-    )
+    # No ALTER DEFAULT PRIVILEGES for this: PostgreSQL supports only
+    # table-level grants there, so a column-scoped default privilege is a
+    # syntax error ("default privileges cannot be set for columns") that
+    # aborts the whole upgrade. A later migration that adds an adjudication
+    # column must extend the grant above explicitly, the same way
+    # deploy/roles.sql does.

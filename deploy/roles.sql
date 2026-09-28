@@ -56,9 +56,11 @@ ALTER DEFAULT PRIVILEGES FOR ROLE sentinel_migrator IN SCHEMA public
     GRANT SELECT ON TABLES TO sentinel_reader;
 ALTER DEFAULT PRIVILEGES FOR ROLE sentinel_migrator IN SCHEMA public
     GRANT SELECT ON TABLES TO sentinel_reviewer;
-ALTER DEFAULT PRIVILEGES FOR ROLE sentinel_migrator IN SCHEMA public
-    GRANT UPDATE (adjudication, adjudicated_by, adjudicated_at, auto_resolved)
-    ON TABLES TO sentinel_reviewer;
+-- Note: PostgreSQL supports only table-level grants in ALTER DEFAULT
+-- PRIVILEGES, so the reviewer's column-scoped UPDATE cannot be defaulted
+-- ("default privileges cannot be set for columns" is a hard error). A
+-- migration that adds an adjudication column must grant it explicitly; the
+-- grant for today's columns is at the bottom of this file.
 
 -- belt-and-braces: revoke everything a mutating writer would need. Public
 -- schema ownership is the cluster default; tighten it so only the migrator can

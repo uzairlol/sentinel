@@ -60,7 +60,13 @@ from sentinel.models.events import (
     Event,
     RefKind,
 )
-from sentinel.models.flags import EvidenceRef, EvidenceRole, Flag, Severity
+from sentinel.models.flags import (
+    EvidenceRef,
+    EvidenceRole,
+    Flag,
+    Severity,
+    register_category,
+)
 from sentinel.query import CallGraph
 from sentinel.store.protocol import EventStore
 
@@ -74,6 +80,10 @@ MODULE_VERSION = "0.1.0"
 #: Flag categories, per the universal flag schema.
 CATEGORY_UNGROUNDED = "ungrounded_claim"
 CATEGORY_CONTRADICTED = "contradicted_claim"
+
+#: Publish the taxonomy this module ships, so `known_categories()` and any tool
+#: that enumerates it agree with the code rather than with a doc.
+register_category(CATEGORY_UNGROUNDED, CATEGORY_CONTRADICTED)
 
 #: Max tool results treated as evidence for one response. Bounded so a session
 #: with thousands of calls cannot make a single diff pathological.

@@ -78,12 +78,31 @@ jobs:
       - uses: astral-sh/setup-uv@v3
       - run: uv sync --group dev --extra postgres
       - name: Run Postgres adapter integration tests
-        run: uv run pytest tests/integration/ tests/contract/ tests/e2e/test_cli_replay_postgres.py -q --no-cov
+        # Coverage is on here, not just tests: this is the only job that can
+        # execute the Postgres store, so it is also the only one that can gate
+        # its coverage. pyproject.toml omits those files from the offline gate
+        # because the offline gate has no database; the two configs together
+        # mean no shipped line escapes a threshold. --no-cov keeps pytest-cov
+        # from writing its own data file over the outer `coverage run`.
+        run: |
+          uv run coverage run -m pytest \
+            tests/integration/ tests/contract/ tests/e2e/test_cli_replay_postgres.py -q --no-cov
+          uv run coverage report
         env:
+          COVERAGE_RCFILE: .coveragerc.postgres
           SENTINEL_TEST_POSTGRES_DSN: postgresql://sentinel:sentinel@localhost:5432/sentinel_test
           SENTINEL_STORE_DSN: postgresql://sentinel:sentinel@localhost:5432/sentinel_test
           SENTINEL_ROLE_WRITER_DSN: postgresql://sentinel_writer:writer_dev@localhost:5432/sentinel_test
           SENTINEL_ROLE_READER_DSN: postgresql://sentinel_reader:reader_dev@localhost:5432/sentinel_test
+          # without this the reviewer least-privilege test skips silently, and
+          # the role ADR-0012 depends on would ship unverified
+          SENTINEL_ROLE_REVIEWER_DSN: postgresql://sentinel_reviewer:reviewer_dev@localhost:5432/sentinel_test
+      - name: Upload Postgres coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-postgres
+          path: .coverage
 
   load:
     name: Load (1M-event losslessness)

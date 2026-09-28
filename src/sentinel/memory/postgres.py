@@ -1,10 +1,12 @@
 """Postgres-backed reference memory adapter (``S1-T11``).
 
 Stores entries in a ``memory_entries`` table via ``asyncpg`` using only
-parameterized SQL. Requires the ``postgres`` extra
-(``pip install "sentinel-sdk[postgres]"``); the adapter raises
-:class:`MemoryPostgresUnavailableError` otherwise. Exercised by the Postgres
-integration job in CI (``tests/integration/test_memory_postgres.py``).
+parameterized SQL. The table is created by Alembic migration ``0003``, not at
+runtime: DDL belongs to the ``sentinel_migrator`` role under the model of
+``docs/adr/0011``, so the adapter is a pure reader/writer. Requires the
+``postgres`` extra (``pip install "sentinel-sdk[postgres]"``); the adapter
+raises :class:`MemoryPostgresUnavailableError` otherwise. Exercised by the
+Postgres integration job in CI (``tests/integration/test_memory_postgres.py``).
 """
 
 from __future__ import annotations
@@ -38,20 +40,7 @@ class PostgresMemoryStore:
 
     async def _open(self) -> Any:  # noqa: ANN401 -- the asyncpg pool type
         if self._pool is None:
-            pool = await self._asyncpg.create_pool(self._dsn, min_size=1, max_size=4)
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS memory_entries (
-                        id TEXT PRIMARY KEY,
-                        entry_key TEXT NOT NULL,
-                        value TEXT NOT NULL,
-                        summary TEXT,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                    )
-                    """
-                )
-            self._pool = pool
+            self._pool = await self._asyncpg.create_pool(self._dsn, min_size=1, max_size=4)
         return self._pool
 
     async def write(

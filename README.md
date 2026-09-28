@@ -19,10 +19,20 @@ checkpoint until a human approves, rejects, or requests revision.
 
 ## Status
 
-**Pre-alpha (maturity `35`).** Sprint `S3` (first evaluator module — flag
-schema, worker framework, and tool-use provenance) gate is green on `main`,
-with `S1` (instrumentation) and `S2` (event store) before it. 398 tests / ~90%
-coverage, `mypy --strict` + ruff + bandit clean. See the master plan in
+**Pre-alpha (maturity `25 → 35`, in progress).** Sprint `S3` (first evaluator
+module — flag schema, worker framework, tool-use provenance) is a
+**conditional** pass on `main`, with `S1` (instrumentation) and `S2` (event
+store) before it. What works: the flag schema and adjudication model, the
+worker framework, and detection of an agent **contradicting its own tool
+output**, measured at **0.00% FP / 0.00% FN** over a 22-case corpus. What does
+not yet work: detection of an agent **citing a source it never consulted**, and
+of cherry-picked numbers — both are silent misses, and both are absent from the
+corpus, so the 0.00% figures describe a narrower test set than the sprint
+planned. See the known gaps in
+[`docs/design/SENTINEL_TDD.md`](docs/design/SENTINEL_TDD.md) and the
+[limitations](docs/modules/provenance.md#limitations) section before relying on
+this module. Test count, coverage, and `mypy --strict` + ruff + bandit status
+are reported in the master plan in
 [`SENTINEL_TDD.md`](docs/design/SENTINEL_TDD.md) for the full
 `-1 → 101` roadmap, per-sprint work packages, and exit gates — the `S3` row of
 the [Roadmap Status Board](docs/design/SENTINEL_TDD.md#34-roadmap-status-board)

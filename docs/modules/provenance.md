@@ -13,10 +13,16 @@ budget in [`SENTINEL_TDD.md`](../design/SENTINEL_TDD.md) §S3.
 
 Two categories, both registered in the flag taxonomy:
 
-| Category | Meaning | Default severity |
+| Category | Meaning | Severity |
 |---|---|---|
-| `contradicted_claim` | The agent cited evidence and the evidence says something else. `details["observed_value"]` holds what was actually observed. | `high` for money/date/count, `medium` otherwise |
-| `ungrounded_claim` | The agent asserted a specific checkable fact that no tool result in the turn supports. | `medium` for money/date/count, `low` otherwise |
+| `contradicted_claim` | The agent cited evidence and the evidence says something else. `details["observed_value"]` holds what was actually observed. | `high` for a number, boolean or set; `medium` for a date/duration, for a comparative claim, and by default |
+| `ungrounded_claim` | The agent asserted a specific checkable fact that no tool result in the turn supports. | `medium` for a number, boolean or set; `low` for a date/duration, comparative, and by default |
+
+A wrong price is worse than a wrong date, so severity follows the claim's kind,
+not merely whether it is a finding: a contradicted number outranks a contradicted
+date, and any contradiction outranks an ungrounded claim of the same kind. Note
+that an ungrounded *date* is `low`, not `medium` — the default `medium` in the
+flag schema is the floor, not the common case.
 
 Supported and implied claims produce nothing. `IMPLIED` is tracked separately
 from `SUPPORTED` because "5.0 ms" against an observed "5.04" is support, but it
@@ -71,7 +77,10 @@ llm.response ──► extract claims ──► gather evidence ──► diff �
 Rule-first and deterministic. A response is split into assertion-sized fragments
 (abbreviation-aware, so `p95.` and `Dr.` do not cut a claim in half), each
 fragment is classified by surface pattern, and each claim normalizes to
-`{claim_text, claimed_source, claimed_value}`:
+`{claim_text, claimed_value}`. **`claimed_source` is not modelled** — the
+sprint specified it, and nothing shipped consumes it, because resolving which
+tool result a claim is *about* is the unimplemented work described under
+[Limitations](#limitations):
 
 | Kind | Example | Checkable? |
 |---|---|---|
@@ -84,6 +93,11 @@ fragment is classified by surface pattern, and each claim normalizes to
 | `entity` | "the endpoint is api.example.com" | no |
 | `vague` | "according to the document, it is fine" | only if the lexicon resolves it |
 
+Note that this is a **value-shape** taxonomy, not the `grounded_claim` /
+`numeric_claim` / `ungrounded` span classification `S3-T5` specified. Whether a
+claim is grounded is decided later, by the diff — a design that keeps extraction
+and adjudication separate, but not the one the plan described.
+
 Implicit grounding is **data, not code**: `GroundingLexicon.DEICTIC` maps 21
 phrases (`today`, `the latest`, `as of now`, …) to a reference kind. The rules
 resolve a phrase *against the evidence only*, never against a wall clock — a
@@ -91,13 +105,23 @@ resolve a phrase *against the evidence only*, never against a wall clock — a
 `datetime.now()`. That is what keeps the module deterministic and its FP/FN
 numbers reproducible.
 
+The lexicon is **deictic only**: every entry resolves against a *value* in the
+evidence. The attribution phrases `S3-T7` names — "according to the document",
+"the search returned", "the API shows" — name a *source* rather than a value and
+are **not** in it. The `vague` row above is therefore reachable in principle but
+only via deictic phrasing; "according to the document, it is fine" is treated as
+a non-checkable claim and passed over.
+
 Pronouns and conversational fragments are not claims. "It went up 4%" has no
 antecedent in the sentence, and a detector that flags it for want of one is worse
 than one that misses.
 
-`ClaimExtractor` is an interface. Swapping in a small-model classifier is a new
-module version, which by ADR-0012 is a new finding rather than an overwrite of
-the old one.
+`ClaimExtractor` is a real `Protocol` and the evaluator takes one by
+constructor, so swapping in a small-model classifier touches no evaluator code
+and is covered by a test that injects a non-default extractor end to end. No
+model-backed extractor ships; the protocol is the seam one would slot into.
+Doing so is a new module version, which by ADR-0012 is a new finding rather than
+an overwrite of the old one.
 
 ### 2. Evidence gathering
 
@@ -167,8 +191,10 @@ await store.adjudicate_flag(flag.flag_id, Adjudication.CONFIRMED, adjudicated_by
 ```
 
 Adjudication is first-write-wins (`ADR-0012`), so the row keeps saying what the
-module found even after a human disagrees. `sentinel_reviewer` holds `UPDATE` on
-flags; `sentinel_writer` stays append-only (`ADR-0011`).
+module found even after a human disagrees. `sentinel_reviewer` holds
+column-scoped `UPDATE` on the four adjudication columns of `flags` and nothing
+else — no `INSERT`, no `DELETE`, no `UPDATE` of `summary` or `evidence`;
+`sentinel_writer` stays append-only (`ADR-0011`).
 
 ## Determinism (`S3-T4`)
 
@@ -183,9 +209,16 @@ that true, and each is load-bearing:
 A forced re-run rewrites the same rows, so a rules fix that changes a verdict
 lands under a *new* `module_version` and does not silently overwrite history.
 
-## Worked example: a fabricated citation (`S3-T17`)
+## Worked example: a fabricated number (`S3-T17`)
 
 The agent looks up a price and is told to make the answer sound confident.
+
+> **Read the title literally.** This is a fabricated *value*, not a fabricated
+> *citation*. The tool call in this fixture really happened and really returned
+> `$49`; the agent lied about what it said. The harder case `S3-T17` names —
+> citing a source that was never consulted — is **not detected today**, and
+> `contradicted_price` should not be cited as evidence that it is. See
+> [Limitations](#limitations).
 
 ```python
 from sentinel.eval.fixtures.provenance_corpus import case_by_id
@@ -235,6 +268,25 @@ observed to quote — and, by default, a queued rather than gating flag.
 Stated plainly, because a safety tool that overstates itself is worse than one
 that does not ship:
 
+- **There is no per-claim source resolution, so fabricated citations are
+  invisible.** This is the first thing to understand about the module. Evidence
+  is gathered for the whole turn and a claim is grounded if *any* value in that
+  turn matches it. Nothing records which tool result a claim was *about*, so an
+  agent that says "according to the SEC filing, revenue rose 40%" after never
+  calling anything produces no flag — there is no call to contradict it with.
+  `ungrounded_claim` fires on a value with no support anywhere in the turn, not
+  on a source that was never consulted. Those are different failures and only
+  the first is implemented. `claimed_source` is consequently not modelled
+  (`S3-T6`), and there is no `provenance_diff` symbol: the shipped seam is
+  `gather_evidence` plus `diff_claim`.
+- **Cherry-picked numbers are not detected.** Reporting `2 of 3 checks passed`
+  and omitting the third is a silence, not a contradiction. The corpus has no
+  case for it, and adding one without a rule would fail the FN gate immediately.
+- **Only deictic grounding language is handled.** The lexicon resolves "today",
+  "the latest release", "currently" — phrases that point at a *value*. The
+  attribution phrases (`S3-T7` names "according to the document", "the search
+  returned", "the API shows") point at a *source* and are unimplemented, because
+  resolving them is the source-resolution work above.
 - **Rule-based extraction.** It reads surface patterns, not meaning. A claim
   phrased in a way no rule anticipates is invisible to it. This is the main
   source of false negatives, and the reason the gate has a 10% FN ceiling rather
@@ -242,6 +294,9 @@ that does not ship:
 - **Turn-scoped evidence.** A claim grounded in something the agent read three
   turns ago reads as ungrounded. A memory-integrity module (`S4`) is the
   intended fix; until then, long-horizon claims will queue.
+- **Reasoning traces are not read.** Extraction consumes `llm.response` only;
+  no reasoning/thinking content is captured anywhere in the SDK yet, so a claim
+  the model committed to in its reasoning and hedged in its reply is unexamined.
 - **Subject matching is lexical.** Contradiction detection needs a shared
   non-generic term, so a claim about "it" and evidence about "the pro plan" with
   no shared noun is silence rather than conflict. Conservative on purpose: a
@@ -249,13 +304,20 @@ that does not ship:
 - **The corpus is 22 sessions, self-authored.** It is a regression suite and a
   gate, not an evaluation of the module against real traffic. Sizing the true
   rate needs a labelled sample of production sessions (`S13`), and until that
-  exists the honest claim is "0% on 22 hand-built cases".
+  exists the honest claim is "0% on 22 hand-built cases". It also omits the two
+  categories the sprint specified — fabricated citations and cherry-picked
+  numbers — so the 0.00% FN figure describes a corpus narrower than the task.
 - **A zero FP rate is a design constraint, not an achievement.** The
   `is_actionable` policy is deliberately narrow. Recall is expected to be the
   weaker number on real traffic.
 - **Severity is a guess about consequence.** `_CRITICAL_KINDS` and
-  `_HIGH_KINDS` are a starting taxonomy, not a calibrated model of what an
-  operator should be paged for.
+  `_HIGH_KINDS` key off the claim's *kind*, not the domain of the value. Money
+  and quantity escalate; **legal and safety do not** — a wrong legal deadline
+  ranks the same as a wrong meeting time (`S3-T9`). It is a starting taxonomy,
+  not a calibrated model of what an operator should be paged for.
+- **`provenance_core` has no consumer.** It is written as the shared mechanism
+  `S4` will import, and is guarded against depending back on `sentinel.instrument`
+  — but `S4` does not exist yet, so today the only caller is `S3` itself.
 
 ## Where the code lives
 

@@ -15,6 +15,8 @@ regardless of which rule fired:
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from sentinel.eval.fixtures.provenance_corpus import case_by_id
@@ -26,6 +28,13 @@ from sentinel.eval.provenance import (
     ProvenanceEvaluator,
     ProvenanceResult,
     gather_evidence,
+)
+from sentinel.eval.provenance_core import (
+    Claim,
+    ClaimKind,
+    RuleBasedClaimExtractor,
+    Value,
+    ValueKind,
 )
 from sentinel.eval.session import SessionView
 from sentinel.models.events import LLM_RESPONSE
@@ -323,3 +332,52 @@ class TestAnalysis:
         assert [item.claim.text for item in first.findings] == [
             item.claim.text for item in second.findings
         ]
+
+
+class TestPluggableExtraction:
+    """``ClaimExtractor`` is a real seam, not a promise in a docstring.
+
+    ``S3-T5`` asks for rules first with a classifier behind an interface, so
+    swapping in a model-backed extractor has to work end to end without touching
+    the evaluator. This is the only test that injects a non-default one.
+    """
+
+    class _FixedExtractor:
+        """Stands in for a model-backed extractor: one claim, always."""
+
+        def __init__(self, claim: Claim) -> None:
+            self._claim = claim
+            self.seen: list[str] = []
+
+        async def extract(self, text: str) -> list[Claim]:
+            self.seen.append(text)
+            return [self._claim]
+
+    async def test_an_injected_extractor_replaces_the_rules(self) -> None:
+        store, session_id = await _store("grounded_explicit_price")
+        claim = Claim(
+            claim_id="c-injected-1",
+            text="the annual fee is 400 usd",
+            kind=ClaimKind.NUMERIC,
+            cue="injected",
+            value=Value(
+                kind=ValueKind.NUMBER,
+                canonical="400 usd",
+                number=Decimal(400),
+                unit="usd",
+            ),
+        )
+        extractor = self._FixedExtractor(claim)
+        evaluator = ProvenanceEvaluator(store, extractor=extractor)
+
+        flags = await evaluator.evaluate_session(session_id)
+
+        # the default rules find nothing wrong here, so a flag can only come
+        # from the injected claim
+        assert [flag.category for flag in flags] == [CATEGORY_UNGROUNDED]
+        assert extractor.seen, "the evaluator must use the injected extractor"
+
+    async def test_the_default_extractor_is_used_when_none_is_injected(self) -> None:
+        store, _ = await _store("grounded_explicit_price")
+        evaluator = ProvenanceEvaluator(store)
+        assert isinstance(evaluator._extractor, RuleBasedClaimExtractor)

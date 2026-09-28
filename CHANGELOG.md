@@ -21,25 +21,71 @@ Sprint `S3` — Tool-Use Grounding & Provenance. First evaluator module.
   idempotent writes, bounded retries with jittered backoff, resumable
   checkpoints, bounded `SessionView`, and call-graph context.
 - Claim extraction (`sentinel.eval.provenance_core`): rule/template classifier
-  with a pluggable model hook, a maintained deictic grounding lexicon, and
-  normalisation to `{claim_text, claimed_source, claimed_value}`.
-- `provenance_diff`: flags `ungrounded_claim` when no matching call exists and
-  `contradicted_claim` when the observed value refutes the claim, with the
+  behind a `ClaimExtractor` protocol, a maintained deictic grounding lexicon,
+  and normalisation of each claim's text and value.
+- Provenance diff: flags `ungrounded_claim` when no value in the turn supports a
+  claim and `contradicted_claim` when the observed value refutes it, with the
   observed value carried in the flag and its evidence marked `countervailance`.
 - Review routing (`S3-T15`): flags at or below the module's confidence
   threshold are written `review_only` and queue for `S7` instead of gating.
-- 22-case adversarial corpus (`known-good` vs `known-bad`, replayable event
+- 22-case adversarial corpus (10 known-good, 12 known-bad; replayable event
   sequences) and the `sentinel eval-fixtures --module provenance` harness, which
   prints a confusion matrix with case/claim FP and FN rates. **Measured: FP
   0.00%, FN 0.00%** against budgets of ≤ 5% FP / ≤ 10% FN.
-- `sentinel.eval.provenance` reusable core, imported directly by `S4`.
+- `sentinel.eval.provenance` reusable core, store-free and guarded against
+  depending back on `sentinel.instrument`. Built for `S4` to import; `S4` has
+  not been written yet, so it has no consumer today.
 
 ### Changed
 
 - The offline coverage gate no longer counts the Postgres store and its ORM
-  models, which only the Postgres integration job executes — matching the
-  existing treatment of the Postgres memory adapter. Every other module is
-  still held to ≥ 90%.
+  models, which it cannot execute without a database. They are no longer
+  unmeasured: the `integration-postgres` job runs them against a real database
+  and gates them at ≥ 90% via a new `.coveragerc.postgres` (measured 94% store,
+  100% models, 97% memory adapter).
+- `adjudicate_flag()` is now first-write-wins on both backends. It previously
+  let a second reviewer overwrite `adjudicated_by`, destroying the audit record
+  the append-only design depends on.
+- `Flag` rejects a decision with no author, or an author with no decision, so a
+  row can answer "who ruled, and when" on its own once its evidence is pruned.
+
+### Fixed
+
+- Migration `0002_flags_s3` could not run on Postgres at all: it issued a
+  column-scoped `ALTER DEFAULT PRIVILEGES`, which PostgreSQL rejects with
+  `default privileges cannot be set for columns`, aborting `alembic upgrade`
+  before any column was added. **The `integration-postgres` CI job has been
+  failing since this sprint began**; S3 was never validated against Postgres
+  until now. The invalid statement is gone, and `deploy/roles.sql` no longer
+  carries the same error.
+- New migration `0003_memory_entries` creates the memory adapter's table
+  instead of the adapter running `CREATE TABLE` on first connect. Runtime DDL
+  contradicted the role model in `deploy/roles.sql` (the writer has no
+  `CREATE`), and it made the table's existence depend on whether a read had
+  happened first, which broke the integration fixture against a fresh database.
+- `PostgresMemoryStore` is a pure reader/writer; its table is schema-managed.
+- `docs/flag-schema.md` overstated the reviewer's grant as `INSERT, SELECT,
+  UPDATE`. The actual grant is `SELECT` plus `UPDATE` limited to
+  `adjudication, adjudicated_by, adjudicated_at, auto_resolved`, so a reviewer
+  cannot insert or rewrite a finding — only rule on one. Now documented
+  correctly and covered by
+  `tests/integration/test_db_roles.py::test_reviewer_may_only_adjudicate_flags`,
+  which connects as the role and asserts the four writable columns plus the
+  five rejections. The `integration-postgres` job now sets
+  `SENTINEL_ROLE_REVIEWER_DSN`, without which that test skipped silently and
+  the role ADR-0012 depends on would have shipped unverified.
+
+### Known limitations
+
+Carried out of `S3` and recorded in
+[`SENTINEL_TDD.md`](docs/design/SENTINEL_TDD.md). The module detects an agent
+contradicting its own tool output. It does **not** detect an agent citing a
+source it never consulted: evidence is matched to a claim by value across the
+whole turn, with no per-claim source resolution, so fabricated citations and
+cherry-picked numbers are silent misses and are absent from the corpus. The
+attribution lexicon ("according to the document", "the API shows") is also
+unimplemented, as is legal/safety severity weighting. The 0.00% FP/FN figures
+are exact for the corpus that exists and do not bound the real-world error rate.
 
 ## [0.0.4] - 2026-09-24
 
