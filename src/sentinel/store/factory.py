@@ -48,8 +48,20 @@ def build_store(dsn: str | None = None) -> EventStore:
 
 
 def _sqlite_path(dsn: str | None) -> str:
-    """Extract a file path from a ``sqlite:`` DSN (or ``:memory:``)."""
+    """Extract a file path from a ``sqlite:`` DSN (or a bare path, as given).
+
+    ``sqlite:///abs/path`` is the URI spelling of the absolute path
+    ``/abs/path``: removing the scheme already leaves the path intact, and the
+    *single* slash the URI form contributes is part of the path. Stripping
+    slashes here instead turned a bare absolute POSIX path into a relative one
+    whose parent directory does not exist -- which is why this only ever
+    surfaced on Linux CI, where ``tmp_path`` starts with a slash.
+    """
     if not dsn or dsn == "sqlite://" or dsn.endswith(":memory:"):
         return ":memory:"
+    if not dsn.startswith("sqlite:"):
+        # a bare file path: hand it to the store unchanged
+        return dsn
     path = dsn.removeprefix("sqlite://")
-    return path.lstrip("/") or ":memory:"
+    # `sqlite:///` and friends carry no path at all
+    return path if path.strip("/") else ":memory:"

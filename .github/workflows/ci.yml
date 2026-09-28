@@ -91,6 +91,14 @@ jobs:
         run: |
           docker exec -i ${{ job.services.postgres.id }} \
             psql -v ON_ERROR_STOP=1 -U sentinel -d sentinel_test < deploy/roles.sql
+      - name: Apply schema
+        # The service container starts empty. Only test_migration.py builds the
+        # schema, and pytest runs it after the store and memory tests, so
+        # without this they hit `relation "sessions" does not exist`. The
+        # migration test still round-trips from base on its own.
+        run: uv run alembic upgrade head
+        env:
+          SENTINEL_STORE_DSN: postgresql://sentinel:sentinel@localhost:5432/sentinel_test
       - name: Run Postgres adapter integration tests
         # Coverage is on here, not just tests: this is the only job that can
         # execute the Postgres store, so it is also the only one that can gate

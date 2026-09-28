@@ -74,6 +74,18 @@ Sprint `S3` — Tool-Use Grounding & Provenance. First evaluator module.
     the offline test job — which installs no database driver — aborted
     collection of the entire suite, not just that module. Now collected through
     `pytest.importorskip`, matching the other integration modules.
+  - The `integration-postgres` job's service container starts with an empty
+    schema, and only `test_migration.py` builds one — but pytest runs it after
+    the store and memory tests, so those died on `relation "sessions" does not
+    exist`. The job now applies the schema before the suite, exactly as the
+    `load` job does.
+- `_sqlite_path()` stripped leading slashes to turn `sqlite:///abs/path` into
+  `/abs/path`, which also turned a **bare** absolute POSIX path into a relative
+  one whose parent directory does not exist. The symptom was
+  `sqlite3.OperationalError: unable to open database file` on Linux CI only —
+  on Windows `tmp_path` begins with a drive letter, so the strip was a no-op
+  and every local run passed. `tests/unit/test_store_factory_dsn.py` now pins
+  the bare-path, URI-form, relative, Windows and `:memory:` cases.
 - `deploy/roles.sql` is now idempotent, resolves the database with
   `current_database()` instead of hardcoding `sentinel` (so one file provisions
   both the compose stack and CI's `sentinel_test`), and skips the reviewer's
