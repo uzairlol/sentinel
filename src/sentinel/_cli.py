@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     fixtures.add_argument(
         "--module",
         required=True,
-        help="module short name: provenance (S3) or memory (S4)",
+        help="module short name: provenance (S3), memory (S4), faithfulness (S5)",
     )
     _add_output_arg(fixtures)
     fixtures.set_defaults(func=_cmd_eval_fixtures)

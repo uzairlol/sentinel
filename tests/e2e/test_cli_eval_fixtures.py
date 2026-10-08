@@ -15,6 +15,7 @@ import sys
 import pytest
 
 from sentinel._cli import main
+from sentinel.eval.fixtures.faithfulness_corpus import FAITHFULNESS_CORPUS
 from sentinel.eval.fixtures.memory_corpus import MEMORY_CORPUS
 from sentinel.eval.fixtures.provenance_corpus import CORPUS
 
@@ -205,3 +206,68 @@ def test_both_modules_are_listed_in_usage() -> None:
     assert result.returncode == 2
     assert "memory" in result.stderr
     assert "provenance" in result.stderr
+
+
+# -- the faithfulness module (``S5-T13``)
+
+
+def test_the_faithfulness_corpus_passes_its_gate(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["eval-fixtures", "--module", "faithfulness"])
+
+    out = capsys.readouterr().out
+    assert "sentinel.reasoning_faithfulness@0.1.0" in out
+    assert "false-negative rate: 0.00%" in out
+    assert "false-positive rate: 0.00%" in out
+    assert out.rstrip().endswith("PASS")
+
+
+def test_the_faithfulness_report_counts_both_directions(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["eval-fixtures", "--module", "faithfulness"])
+
+    out = capsys.readouterr().out
+    assert f"{len(FAITHFULNESS_CORPUS)} cases" in out
+    assert "should flag" in out
+    assert "should be quiet" in out
+
+
+def test_the_faithfulness_json_carries_the_gates_for_ci(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = main(["eval-fixtures", "--module", "faithfulness", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["passed"] is True
+    assert payload["module"] == "sentinel.reasoning_faithfulness"
+    assert payload["failures"] == []
+
+
+def test_all_three_modules_report_their_own_identity(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A shared harness must not let one module's numbers stand in for another's."""
+    seen = {}
+    for module in ("provenance", "memory", "faithfulness"):
+        main(["eval-fixtures", "--module", module, "--json"])
+        seen[module] = json.loads(capsys.readouterr().out)["module"]
+
+    assert len(set(seen.values())) == 3
+    assert seen == {
+        "provenance": "sentinel.tool_grounding",
+        "memory": "sentinel.memory_integrity",
+        "faithfulness": "sentinel.reasoning_faithfulness",
+    }
+
+
+def test_an_unknown_module_lists_all_three(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["eval-fixtures", "--module", "nonsense"])
+
+    err = capsys.readouterr().err
+    for module in ("provenance", "memory", "faithfulness"):
+        assert module in err

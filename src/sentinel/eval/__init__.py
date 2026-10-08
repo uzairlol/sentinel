@@ -27,6 +27,15 @@ The pieces:
 
 from __future__ import annotations
 
+from sentinel.eval.faithfulness import (
+    CATEGORY_INCONSISTENT,
+    CATEGORY_UNFAITHFUL,
+    FaithfulnessConfig,
+    FaithfulnessEvaluator,
+)
+from sentinel.eval.faithfulness import (
+    MODULE as FAITHFULNESS_MODULE,
+)
 from sentinel.eval.memory import (
     CATEGORY_COLLAPSE,
     CATEGORY_DRIFT,
@@ -60,12 +69,17 @@ __all__ = [
     "CATEGORY_COLLAPSE",
     "CATEGORY_CONTRADICTED",
     "CATEGORY_DRIFT",
+    "CATEGORY_INCONSISTENT",
     "CATEGORY_MEMORY_UNGROUNDED",
+    "CATEGORY_UNFAITHFUL",
     "CATEGORY_UNGROUNDED",
+    "FAITHFULNESS_MODULE",
     "MEMORY_MODULE",
     "PROVENANCE_MODULE",
     "CheckpointStore",
     "EvaluatorWorker",
+    "FaithfulnessConfig",
+    "FaithfulnessEvaluator",
     "InMemoryCheckpointStore",
     "MemoryIntegrityConfig",
     "MemoryIntegrityEvaluator",

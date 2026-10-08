@@ -47,6 +47,7 @@ from sentinel.eval.provenance_core import (
 )
 from sentinel.eval.session import SessionView, response_text_of
 from sentinel.models.events import Event
+from sentinel.models.flags import Flag
 from sentinel.query import build_call_graph
 
 log = structlog.get_logger("sentinel.eval.harness")
@@ -331,6 +332,108 @@ def _run_provenance_corpus() -> CorpusReport:
     return run_corpus(module=MODULE, module_version=MODULE_VERSION)
 
 
+def _run_faithfulness_corpus() -> CorpusReport:
+    """The reasoning-faithfulness corpus (``S5-T13``).
+
+    Reported as its own gate, and deliberately *not* merged with the other two.
+    Faithfulness is the first module whose judgement is probabilistic, so its
+    false-positive number describes a different kind of claim: a judge's error
+    rate and a counterfactual's error rate say nothing about each other, and one
+    averaged figure over both would describe neither.
+
+    Every case runs against the corpus's stub re-executor. That stub has no store,
+    no network and no tools, so the whole corpus is also the ``S5-T6`` sandbox
+    demonstration — there is no code path from a counterfactual case to a real
+    action.
+    """
+    from sentinel.eval.faithfulness import (
+        MODULE as FAITHFULNESS_MODULE,
+    )
+    from sentinel.eval.faithfulness import (
+        MODULE_VERSION as FAITHFULNESS_MODULE_VERSION,
+    )
+    from sentinel.eval.faithfulness import (
+        FaithfulnessConfig,
+        FaithfulnessEvaluator,
+    )
+    from sentinel.eval.fixtures.faithfulness_corpus import (
+        FAITHFULNESS_CORPUS,
+        stub_executor,
+    )
+    from sentinel.store.sqlite import SQLiteEventStore
+
+    async def run() -> CorpusReport:
+        report = CorpusReport(
+            module=FAITHFULNESS_MODULE,
+            module_version=FAITHFULNESS_MODULE_VERSION,
+        )
+        store = SQLiteEventStore(":memory:")
+        try:
+            for case in FAITHFULNESS_CORPUS:
+                events = case.events()
+                for event in events:
+                    await store.append(event)
+                evaluator = FaithfulnessEvaluator(
+                    store,
+                    settings=FaithfulnessConfig(counterfactuals_enabled=True),
+                    re_executor=stub_executor(case),
+                )
+                report.outcomes.append(
+                    await _compare_flags(
+                        case.case_id,
+                        case.expect,
+                        await evaluator.evaluate_session(events[0].session_id),
+                    )
+                )
+        finally:
+            await store.close()
+        if not report.passed:
+            log.warning(
+                "corpus.gate_failed",
+                module=FAITHFULNESS_MODULE,
+                module_version=FAITHFULNESS_MODULE_VERSION,
+                failures=report.failures,
+            )
+        return report
+
+    return asyncio.run(run())
+
+
+async def _compare_flags(
+    case_id: str, expect: Sequence[ExpectedFinding], flags: Sequence[Flag]
+) -> CaseOutcome:
+    """Match produced flags against hand-written expectations.
+
+    Factored out of the memory runner because both do the same comparison, and two
+    copies of a matcher would drift — and a matcher that drifts is a gate that
+    quietly stops checking something.
+    """
+    produced = [
+        ExpectedFinding(
+            category=flag.category,
+            claim_contains=str(flag.details.get("claim_text") or flag.details.get("detail", "")),
+            verdict=str(flag.details.get("mechanism", "")),
+            severity=str(flag.severity),
+        )
+        for flag in flags
+    ]
+    missing: list[str] = []
+    unmatched = list(range(len(produced)))
+    for expected in expect:
+        index = _find_match(expected, produced, unmatched)
+        if index is None:
+            missing.append(f"{expected.category} containing {expected.claim_contains!r}")
+        else:
+            unmatched.remove(index)
+    return CaseOutcome(
+        case_id=case_id,
+        expected=len(expect),
+        produced=len(produced),
+        missing=tuple(missing),
+        spurious=tuple(produced[index].claim_contains for index in unmatched),
+    )
+
+
 def _run_memory_corpus() -> CorpusReport:
     """The memory-integrity corpus (``S4-T12``).
 
@@ -466,7 +569,11 @@ def _matches(expected: ExpectedFinding, candidate: ExpectedFinding) -> bool:
 #: The runner is a function rather than a literal module id so a report can never
 #: claim to have tested a version the module did not ship — each runner reads
 #: ``MODULE``/``MODULE_VERSION`` from the module itself.
-CORPUS_RUNNERS = {"provenance": _run_provenance_corpus, "memory": _run_memory_corpus}
+CORPUS_RUNNERS = {
+    "provenance": _run_provenance_corpus,
+    "memory": _run_memory_corpus,
+    "faithfulness": _run_faithfulness_corpus,
+}
 
 
 def run_module_corpus(module: str) -> CorpusReport:
