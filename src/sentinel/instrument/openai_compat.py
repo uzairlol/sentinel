@@ -20,7 +20,7 @@ captured in full for streams beyond the capped transcript.
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 
 import httpx
@@ -67,15 +67,19 @@ async def chat_completion(
     latency_ms = (time.perf_counter() - started) * 1000.0
 
     body = _parse_json_body(response)
+    payload: dict[str, Any] = {
+        "method": method,
+        "url": url,
+        "status_code": response.status_code,
+        "latency_ms": latency_ms,
+        "response": body,
+    }
+    traces = _reasoning_traces(body)
+    if traces:
+        payload["reasoning"] = traces
     await session_ctx.capture(
         type=LLM_RESPONSE,
-        payload={
-            "method": method,
-            "url": url,
-            "status_code": response.status_code,
-            "latency_ms": latency_ms,
-            "response": body,
-        },
+        payload=payload,
         refs=[RefLink(event_id=request_event.event_id, kind=RefKind.CAUSED_BY)],
     )
 
@@ -186,3 +190,41 @@ def _parse_json_body(response: httpx.Response) -> dict[str, Any]:
     if not isinstance(body, Mapping):
         return {"raw": repr(body)[:MAX_CAPTURED_TEXT]}
     return dict(body)
+
+
+#: Provider vocabularies for a model's reasoning trace on an OpenAI-shaped
+#: message. OpenAI itself calls it ``reasoning``; DeepSeek and several gateways
+#: call it ``reasoning_content``; Ollama's OpenAI-compatible endpoint and Qwen
+#: call it ``thinking``.
+_REASONING_FIELDS = ("reasoning", "reasoning_content", "thinking", "thought")
+
+
+def _reasoning_traces(body: Mapping[str, Any]) -> list[str]:
+    """The reasoning traces in an OpenAI-shaped completion body, in choice order.
+
+    Lifted out of the raw body rather than left for the evaluator to find,
+    because the whole body is already stored: without this the trace is present
+    but unaddressable, because ``reasoning_content`` lives at
+    ``choices[i].message.reasoning_content`` — a list-nested path no generic
+    key lookup walks without re-implementing the response schema here.
+
+    Each trace is capped at :data:`MAX_CAPTURED_TEXT`: a reasoning model can
+    produce a trace far longer than its answer, and the trace is checked against
+    evidence like any other claim but is not worth an unbounded payload.
+    """
+    choices = body.get("choices")
+    if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes)):
+        return []
+    traces: list[str] = []
+    for choice in choices:
+        if not isinstance(choice, Mapping):
+            continue
+        message = choice.get("message") or choice.get("delta")
+        if not isinstance(message, Mapping):
+            continue
+        for name in _REASONING_FIELDS:
+            value = message.get(name)
+            if isinstance(value, str) and value:
+                traces.append(value[:MAX_CAPTURED_TEXT])
+                break
+    return traces

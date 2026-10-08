@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from sentinel import SQLiteEventStore, session
+from sentinel.eval.session import reasoning_text_of
 from sentinel.instrument.langchain import (
     MAX_CAPTURED_TEXT,
     LangChainInstrumentor,
@@ -79,8 +80,16 @@ async def events_store() -> AsyncIterator[SQLiteEventStore]:
         await store.close()
 
 
-def _model(text: str = "Hello!") -> GenericFakeChatModel:
-    return GenericFakeChatModel(messages=iter([AIMessage(content=text)]))
+def _model(text: str = "Hello!", *, message: Any = None) -> GenericFakeChatModel:
+    """A fake chat model returning one message.
+
+    ``message=`` overrides ``text=`` so a test can hand back a message carrying
+    provider fields (``additional_kwargs``, ``reasoning_content``) that
+    ``AIMessage(content=...)`` alone cannot express.
+    """
+    return GenericFakeChatModel(
+        messages=iter([message if message is not None else AIMessage(content=text)])
+    )
 
 
 def _llm_events(events: list[Event]) -> tuple[Event, Event]:
@@ -254,3 +263,78 @@ def test_missing_langchain_raises_unavailable_error() -> None:
     finally:
         builtins.__import__ = real_import
         module._HANDLER_CLASS = None
+
+
+# -- reasoning capture (``S3-T5`` gap: a trace the reader must be able to find)
+
+
+async def test_a_reasoning_trace_is_captured_from_additional_kwargs(
+    events_store: SQLiteEventStore,
+) -> None:
+    """A figure stated while thinking is a claim, and it is captured.
+
+    LangChain puts a provider's thinking trace beside ``.content`` rather than
+    inside it, so capturing the text alone drops every number the model
+    considered — including the ones it revised away, which are the ones no
+    reader ever sees.
+    """
+    message = AIMessage(
+        content="The price is $49.",
+        additional_kwargs={"reasoning_content": "Maybe $79? No, $49 is in the tool."},
+    )
+    async with session(events_store) as ctx:
+        instrumentor = LangChainInstrumentor(ctx)
+        chain = ChatPromptTemplate.from_template("price?") | _model(message=message)
+        await chain.ainvoke({}, config={"callbacks": [instrumentor.handler()]})
+
+    events = await events_store.get_session(ctx.session_id)
+    _, resp = _llm_events(events)
+    assert resp.payload["reasoning"] == ["Maybe $79? No, $49 is in the tool."]
+    assert reasoning_text_of(resp) == "Maybe $79? No, $49 is in the tool."
+
+
+async def test_a_reasoning_trace_is_captured_from_a_direct_field(
+    events_store: SQLiteEventStore,
+) -> None:
+    message = AIMessage(content="done", reasoning_content="thinking hard")
+    async with session(events_store) as ctx:
+        instrumentor = LangChainInstrumentor(ctx)
+        chain = ChatPromptTemplate.from_template("x") | _model(message=message)
+        await chain.ainvoke({}, config={"callbacks": [instrumentor.handler()]})
+
+    events = await events_store.get_session(ctx.session_id)
+    _, resp = _llm_events(events)
+    assert reasoning_text_of(resp) == "thinking hard"
+
+
+async def test_no_reasoning_key_is_written_when_there_is_no_trace(
+    events_store: SQLiteEventStore,
+) -> None:
+    """Absent, not empty: an empty trace is indistinguishable from a
+    non-reasoning model once it reaches a flag's evidence."""
+    async with session(events_store) as ctx:
+        instrumentor = LangChainInstrumentor(ctx)
+        chain = ChatPromptTemplate.from_template("Say hi") | _model()
+        await chain.ainvoke({}, config={"callbacks": [instrumentor.handler()]})
+
+    events = await events_store.get_session(ctx.session_id)
+    _, resp = _llm_events(events)
+    assert "reasoning" not in resp.payload
+    assert reasoning_text_of(resp) == ""
+
+
+async def test_a_reasoning_trace_is_capped_like_any_transcript(
+    events_store: SQLiteEventStore,
+) -> None:
+    long_trace = "x" * (MAX_CAPTURED_TEXT + 500)
+    message = AIMessage(content="done", reasoning_content=long_trace)
+    async with session(events_store) as ctx:
+        instrumentor = LangChainInstrumentor(ctx)
+        chain = ChatPromptTemplate.from_template("x") | _model(message=message)
+        await chain.ainvoke({}, config={"callbacks": [instrumentor.handler()]})
+
+    events = await events_store.get_session(ctx.session_id)
+    _, resp = _llm_events(events)
+    trace = resp.payload["reasoning"][0]
+    assert len(trace) < len(long_trace)
+    assert trace.endswith("…[truncated]")

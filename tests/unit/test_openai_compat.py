@@ -12,6 +12,7 @@ import pytest
 import respx
 
 from sentinel import SQLiteEventStore, session
+from sentinel.eval.session import reasoning_text_of
 from sentinel.instrument.openai_compat import (
     MAX_CAPTURED_TEXT,
     TransportCallError,
@@ -170,5 +171,99 @@ async def test_stream_non_success_captures_then_raises() -> None:
         events = await store.get_session(ctx.session_id)
         assert events[2].payload["status_code"] == 429
         assert events[2].payload["chunk_count"] == 0
+    finally:
+        await store.close()
+
+
+# -- reasoning capture (``S3-T5`` gap)
+
+
+async def test_a_reasoning_trace_is_lifted_out_of_the_choices() -> None:
+    """``reasoning_content`` lives at ``choices[i].message`` — two levels down a
+    list. The whole body is stored either way; without naming it, the trace is
+    captured and unreachable."""
+    reply = {
+        "choices": [
+            {"message": {"role": "assistant", "content": "$49.", "reasoning_content": "maybe $79"}}
+        ]
+    }
+    store = SQLiteEventStore(":memory:")
+    try:
+        with respx.mock:
+            respx.post(URL).mock(return_value=httpx.Response(200, json=reply))
+            async with session(store) as ctx, httpx.AsyncClient() as client:
+                await chat_completion(client, ctx, url=URL, request=BODY)
+
+        resp = next(e for e in await store.get_session(ctx.session_id) if e.type == "llm.response")
+        assert resp.payload["reasoning"] == ["maybe $79"]
+        assert reasoning_text_of(resp) == "maybe $79"
+    finally:
+        await store.close()
+
+
+async def test_reasoning_is_read_from_delta_for_a_streamed_style_body() -> None:
+    store = SQLiteEventStore(":memory:")
+    try:
+        with respx.mock:
+            respx.post(URL).mock(
+                return_value=httpx.Response(
+                    200, json={"choices": [{"delta": {"thinking": "step one"}}]}
+                )
+            )
+            async with session(store) as ctx, httpx.AsyncClient() as client:
+                await chat_completion(client, ctx, url=URL, request=BODY)
+
+        resp = next(e for e in await store.get_session(ctx.session_id) if e.type == "llm.response")
+        assert reasoning_text_of(resp) == "step one"
+    finally:
+        await store.close()
+
+
+async def test_no_reasoning_key_when_the_provider_returns_none() -> None:
+    store = SQLiteEventStore(":memory:")
+    try:
+        with respx.mock:
+            respx.post(URL).mock(return_value=httpx.Response(200, json=FAKE_REPLY))
+            async with session(store) as ctx, httpx.AsyncClient() as client:
+                await chat_completion(client, ctx, url=URL, request=BODY)
+
+        resp = next(e for e in await store.get_session(ctx.session_id) if e.type == "llm.response")
+        assert "reasoning" not in resp.payload
+    finally:
+        await store.close()
+
+
+async def test_a_reasoning_trace_is_capped() -> None:
+    huge = "x" * (MAX_CAPTURED_TEXT + 1000)
+    reply = {"choices": [{"message": {"content": "a", "reasoning_content": huge}}]}
+    store = SQLiteEventStore(":memory:")
+    try:
+        with respx.mock:
+            respx.post(URL).mock(return_value=httpx.Response(200, json=reply))
+            async with session(store) as ctx, httpx.AsyncClient() as client:
+                await chat_completion(client, ctx, url=URL, request=BODY)
+
+        resp = next(e for e in await store.get_session(ctx.session_id) if e.type == "llm.response")
+        assert len(resp.payload["reasoning"][0]) == MAX_CAPTURED_TEXT
+    finally:
+        await store.close()
+
+
+async def test_a_reasoning_trace_survives_a_malformed_body() -> None:
+    """Choices that are not a list of mappings must not raise inside capture.
+
+    Capture never breaks the host call (INV-6), including when a provider
+    returns something the rules were not written against.
+    """
+    store = SQLiteEventStore(":memory:")
+    try:
+        with respx.mock:
+            respx.post(URL).mock(return_value=httpx.Response(200, json={"choices": "nope"}))
+            async with session(store) as ctx, httpx.AsyncClient() as client:
+                reply = await chat_completion(client, ctx, url=URL, request=BODY)
+
+        assert reply == {"choices": "nope"}
+        resp = next(e for e in await store.get_session(ctx.session_id) if e.type == "llm.response")
+        assert "reasoning" not in resp.payload
     finally:
         await store.close()

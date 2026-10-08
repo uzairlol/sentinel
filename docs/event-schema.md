@@ -82,6 +82,22 @@ or node.
 | `stream` | `true` for `chat_completion_stream`. |
 | `chunk_count` | Number of chunks forwarded (streaming). |
 | `transcript` / `truncated` | Reconstructed stream text; `true` when it exceeded the cap. |
+| `reasoning` | The model's reasoning trace, when the provider returns one. langchain: a list of traces from the message; openai_compat: a list of traces in `choices` order; ollama: a single string from `message.thinking`. Absent when the provider returned none — never an empty value, so "no reasoning model" stays distinguishable from "a trace we failed to read". |
+
+`reasoning` is lifted out of the raw body rather than left inside `response`
+because the provider vocabularies disagree and nest differently: OpenAI's
+`reasoning` and DeepSeek's `reasoning_content` sit at `choices[i].message.*`,
+Ollama's `thinking` at `message.*`, and LangChain's at
+`additional_kwargs.reasoning_content` on the message object. Capturing the body
+without naming the field would leave the trace present but unreachable to any
+generic reader. `sentinel.eval.session.reasoning_text_of` reads this key first
+and still walks the nested shapes, so it also works on logs written by an
+instrumentor that did not lift it.
+
+Streamed responses are the exception: `chat_completion_stream` captures a
+transcript, and a trace streamed as deltas stays inside that transcript rather
+than being lifted. Streaming agents therefore get answer-level checking only.
+Deriving structure from deltas is a capture change to the streaming instrumentors.
 
 `refs`: `caused_by` → the matching `llm.request`; `parent` → the enclosing
 `agent.step`.

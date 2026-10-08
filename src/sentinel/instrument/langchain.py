@@ -117,6 +117,57 @@ def _capped(value: object) -> object:
     return str(value)
 
 
+#: Where a LangChain message carries a model's reasoning trace. Providers that
+#: expose thinking do not agree on a field: some chat integrations put it on the
+#: message directly, most stash it in ``additional_kwargs`` under one of the
+#: provider's own names, and a few only surface it as ``reasoning_content`` on a
+#: vLLM/OpenAI-shaped message object.
+_REASONING_FIELDS = ("reasoning", "reasoning_content", "thinking", "thought")
+
+
+def _reasoning_traces(generations: Sequence[Any]) -> list[str]:
+    """The reasoning traces in *generations*, one per generation that has one.
+
+    A trace is part of what the model asserted. LangChain puts it beside
+    ``.text`` rather than inside it, so capturing ``text`` alone silently drops
+    every number a model stated while thinking — including figures it then
+    revised away, which are exactly the ones a reader never sees and a
+    grounding module should still check.
+
+    Returns the traces positionally aligned with *generations* so a reviewer can
+    tell which answer a trace belongs to. Missing or empty traces are skipped
+    rather than padded, because an empty string is indistinguishable from "no
+    reasoning model in play" once it reaches a flag.
+    """
+    traces: list[str] = []
+    for generation in generations:
+        # ``generations`` is a list of lists: one inner list per LLM call, each
+        # holding that call's ``ChatGeneration`` candidates. A candidate carries
+        # the message, and the message carries the trace.
+        for candidate in generation:
+            if not candidate:
+                continue
+            trace = _message_reasoning(getattr(candidate, "message", None))
+            if trace:
+                traces.append(trace)
+    return traces
+
+
+def _message_reasoning(message: object) -> str:
+    """The reasoning trace on one LangChain message, or ``""``."""
+    for name in _REASONING_FIELDS:
+        value = getattr(message, name, None)
+        if isinstance(value, str) and value:
+            return value
+    additional = getattr(message, "additional_kwargs", None)
+    if isinstance(additional, Mapping):
+        for name in _REASONING_FIELDS:
+            value = additional.get(name)
+            if isinstance(value, str) and value:
+                return value
+    return ""
+
+
 def _activity_name(serialized: dict[str, Any] | None) -> str:
     """Best-effort name for a runnable from LangChain's ``serialized`` dict."""
     snapshot = serialized if isinstance(serialized, dict) else {}
@@ -309,14 +360,18 @@ def _handler_class() -> type[Any]:
                 """Capture the ``llm.response`` linked to its request."""
                 run = self._llm.pop(str(run_id), None)
                 texts = [generation[0].text for generation in response.generations if generation]
+                payload: dict[str, object] = {
+                    "provider": "langchain",
+                    "model": run.name if run else "unknown",
+                    "latency_ms": _latency_ms(run.started if run else None),
+                    "generations": _capped(texts),
+                }
+                traces = _reasoning_traces(response.generations)
+                if traces:
+                    payload["reasoning"] = _capped(traces)
                 await self._capture(
                     type=LLM_RESPONSE,
-                    payload={
-                        "provider": "langchain",
-                        "model": run.name if run else "unknown",
-                        "latency_ms": _latency_ms(run.started if run else None),
-                        "generations": _capped(texts),
-                    },
+                    payload=payload,
                     refs=self._refs(
                         parent_run_id=parent_run_id, caused_by=run.event_id if run else None
                     ),

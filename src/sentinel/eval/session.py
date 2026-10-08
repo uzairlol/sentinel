@@ -13,6 +13,7 @@ capture it.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -242,32 +243,55 @@ def reasoning_text_of(event: Event) -> str:
     stated in the answer — models routinely "revise" a figure mid-thought and
     the abandoned figure is exactly the kind of thing a reader never sees.
 
-    Empty today: no instrumenter writes these keys, so this is a no-op until the
-    capture layer (``S1``) does. It is here so that closing that gap is a
-    capture change and not a module change, and so the reasoning a *provider*
-    does return stops being silently dropped the day someone starts recording
-    it.
+    Every instrumentor that sees a provider body now writes the trace under an
+    explicit :data:`REASONING_KEYS` key, so the fast path is one lookup. The
+    nested walks below stay because they are what makes the reader work on a log
+    written by an older instrumentor, or by a framework Sentinel does not
+    wrap — a provider returning ``{"choices": [{"message": {"thinking": ...}}]}``
+    is stored verbatim by the OpenAI-compatible instrumentor, and a reader that
+    could not find the trace there would report the same silent gap this
+    function was written to close.
     """
     payload = event.payload
     for key in REASONING_KEYS:
         value = payload.get(key)
         if value:
             return as_text(value)
-    # Providers nest the trace beside the message rather than beside the
-    # payload (``{"response": {"message": {"thinking": ...}}}``).
-    for outer in ("response", "message", "choices"):
+    return _nested_reasoning(payload)
+
+
+#: Containers a provider body may nest the trace under. ``choices`` is a *list*,
+#: which is why the walk is not a plain key lookup: OpenAI's reasoning lives at
+#: ``choices[i].message.reasoning_content``, two levels down a list.
+_REASONING_CONTAINERS = ("response", "message", "choices")
+
+
+def _nested_reasoning(payload: Mapping[str, object]) -> str:
+    """Find a reasoning trace inside a provider body, however it is nested."""
+    for outer in _REASONING_CONTAINERS:
         nested = payload.get(outer)
-        if not isinstance(nested, dict):
+        if not isinstance(nested, Mapping):
             continue
-        for inner in ("message", *REASONING_KEYS):
+        for inner in ("message", "delta", *REASONING_KEYS):
             candidate = nested.get(inner)
-            if isinstance(candidate, dict):
+            if isinstance(candidate, Mapping):
                 for key in REASONING_KEYS:
                     if candidate.get(key):
                         return as_text(candidate[key])
         for key in REASONING_KEYS:
             if nested.get(key):
                 return as_text(nested[key])
+        # ``choices`` is a list of choices, each holding a message.
+        choices = nested.get("choices")
+        if isinstance(choices, Sequence) and not isinstance(choices, (str, bytes)):
+            for choice in choices:
+                if not isinstance(choice, Mapping):
+                    continue
+                for message in (choice.get("message"), choice.get("delta")):
+                    if isinstance(message, Mapping):
+                        for key in REASONING_KEYS:
+                            if message.get(key):
+                                return as_text(message[key])
     return ""
 
 

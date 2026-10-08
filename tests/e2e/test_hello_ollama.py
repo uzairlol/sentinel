@@ -12,6 +12,7 @@ import pytest
 import respx
 
 from sentinel import SQLiteEventStore, instrument_ollama_call, session
+from sentinel.eval.session import reasoning_text_of
 from sentinel.instrument.ollama import OllamaChatError
 from sentinel.models.events import RefKind
 
@@ -112,5 +113,56 @@ async def test_instrumented_call_forwards_options() -> None:
 
         events = await store.get_session(ctx.session_id)
         assert events[1].payload["request"]["options"] == {"temperature": 0}
+    finally:
+        await store.close()
+
+
+async def test_an_ollama_thinking_trace_is_captured() -> None:
+    """Ollama returns reasoning models' traces as ``message.thinking``."""
+    reply = {
+        "model": "deepseek-r1",
+        "message": {
+            "role": "assistant",
+            "content": "The price is $49.",
+            "thinking": "Could be $79, but the tool says $49.",
+        },
+        "done": True,
+    }
+    store = SQLiteEventStore(":memory:")
+    try:
+        with respx.mock:
+            respx.post("http://127.0.0.1:11434/api/chat").mock(
+                return_value=httpx.Response(200, json=reply)
+            )
+            async with session(store) as ctx, httpx.AsyncClient() as client:
+                await instrument_ollama_call(
+                    client, ctx, model="deepseek-r1", messages=[{"role": "user", "content": "?"}]
+                )
+
+        response_event = next(
+            e for e in await store.get_session(ctx.session_id) if e.type == "llm.response"
+        )
+        assert response_event.payload["reasoning"] == "Could be $79, but the tool says $49."
+        assert reasoning_text_of(response_event) == "Could be $79, but the tool says $49."
+    finally:
+        await store.close()
+
+
+async def test_no_reasoning_key_for_an_ordinary_ollama_reply() -> None:
+    store = SQLiteEventStore(":memory:")
+    try:
+        with respx.mock:
+            respx.post("http://127.0.0.1:11434/api/chat").mock(
+                return_value=httpx.Response(200, json=FAKE_REPLY)
+            )
+            async with session(store) as ctx, httpx.AsyncClient() as client:
+                await instrument_ollama_call(
+                    client, ctx, model="llama3.2", messages=[{"role": "user", "content": "hi"}]
+                )
+
+        response_event = next(
+            e for e in await store.get_session(ctx.session_id) if e.type == "llm.response"
+        )
+        assert "reasoning" not in response_event.payload
     finally:
         await store.close()
