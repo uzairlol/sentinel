@@ -13,11 +13,13 @@ import subprocess
 import sys
 
 import pytest
+import structlog
 
 from sentinel._cli import main
 from sentinel.eval.fixtures.faithfulness_corpus import FAITHFULNESS_CORPUS
 from sentinel.eval.fixtures.memory_corpus import MEMORY_CORPUS
 from sentinel.eval.fixtures.provenance_corpus import CORPUS
+from sentinel.eval.fixtures.spec_corpus import SPEC_CORPUS
 
 pytestmark = pytest.mark.e2e
 
@@ -194,7 +196,7 @@ def test_the_two_modules_are_measured_separately(
     assert provenance["confusion"] != memory["confusion"]
 
 
-def test_both_modules_are_listed_in_usage() -> None:
+def test_all_modules_are_listed_in_usage() -> None:
     """The help text must not advertise a module that does not exist, or omit
     one that does."""
     result = subprocess.run(
@@ -204,8 +206,8 @@ def test_both_modules_are_listed_in_usage() -> None:
         check=False,
     )
     assert result.returncode == 2
-    assert "memory" in result.stderr
-    assert "provenance" in result.stderr
+    for module in ("provenance", "memory", "faithfulness", "spec"):
+        assert module in result.stderr
 
 
 # -- the faithfulness module (``S5-T13``)
@@ -246,28 +248,120 @@ def test_the_faithfulness_json_carries_the_gates_for_ci(
     assert payload["failures"] == []
 
 
-def test_all_three_modules_report_their_own_identity(
+def test_every_module_reports_its_own_identity(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A shared harness must not let one module's numbers stand in for another's."""
     seen = {}
-    for module in ("provenance", "memory", "faithfulness"):
+    for module in ("provenance", "memory", "faithfulness", "spec"):
         main(["eval-fixtures", "--module", module, "--json"])
         seen[module] = json.loads(capsys.readouterr().out)["module"]
 
-    assert len(set(seen.values())) == 3
+    assert len(set(seen.values())) == 4
     assert seen == {
         "provenance": "sentinel.tool_grounding",
         "memory": "sentinel.memory_integrity",
         "faithfulness": "sentinel.reasoning_faithfulness",
+        "spec": "sentinel.spec_gaming",
     }
 
 
-def test_an_unknown_module_lists_all_three(
+def test_an_unknown_module_lists_every_module(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     main(["eval-fixtures", "--module", "nonsense"])
 
     err = capsys.readouterr().err
-    for module in ("provenance", "memory", "faithfulness"):
+    for module in ("provenance", "memory", "faithfulness", "spec"):
         assert module in err
+
+
+# -- the spec-gaming module (``S6-T8``)
+
+
+def test_the_spec_corpus_passes_its_gate(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``S6-T8``: the FP/FN number the sprint's exit criterion asks for."""
+    code = main(["eval-fixtures", "--module", "spec"])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "sentinel.spec_gaming@0.1.0" in out
+    assert "false-negative rate: 0.00%" in out
+    assert "false-positive rate: 0.00%" in out
+    assert out.rstrip().endswith("PASS")
+
+
+def test_the_spec_report_counts_both_directions(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["eval-fixtures", "--module", "spec"])
+
+    out = capsys.readouterr().out
+    assert f"{len(SPEC_CORPUS)} cases" in out
+    assert "should flag" in out
+    assert "should be quiet" in out
+
+
+def test_the_spec_report_splits_the_detector_classes(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``S6-T8`` asks for FP/FN *per detector class*, not blended.
+
+    S6 ships one structural detector set and one probabilistic scorer. A single
+    averaged rate would let the scorer's noise hide inside a clean structural
+    class, and would charge the structural detectors for a false positive the
+    scorer produced.
+    """
+    main(["eval-fixtures", "--module", "spec"])
+
+    out = capsys.readouterr().out
+    assert "per detector class" in out
+    assert "structural" in out
+    assert "probabilistic" in out
+
+
+def test_the_spec_json_reports_each_class_separately(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = main(["eval-fixtures", "--module", "spec", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["passed"] is True
+    assert payload["module"] == "sentinel.spec_gaming"
+    assert payload["failures"] == []
+    by_class = payload["by_detector_class"]
+    assert set(by_class) == {"structural", "probabilistic"}
+    assert by_class["structural"]["false_positive_rate"] == 0.0
+    assert by_class["probabilistic"]["false_positive_rate"] == 0.0
+
+
+def test_the_single_class_reports_skip_the_breakdown(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A module with one detector class has nothing to split, and saying so
+    would imply a comparison that was not made."""
+    main(["eval-fixtures", "--module", "provenance"])
+
+    assert "per detector class" not in capsys.readouterr().out
+
+
+def test_a_corpus_run_leaves_logging_configured_as_it_found_it(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A corpus run must not change process-wide logging state.
+
+    The suppression that keeps ``--json`` parseable is scoped to the run. An
+    earlier version re-configured structlog process-wide, which meant every
+    later log call's behaviour depended on whether a corpus had run first — and
+    under pytest's capture, a log call bound to a closed stream raised inside
+    the capture-writer thread and hung the suite.
+    """
+    before = structlog.get_config().copy()
+
+    main(["eval-fixtures", "--module", "spec"])
+    capsys.readouterr()
+
+    assert structlog.get_config() == before

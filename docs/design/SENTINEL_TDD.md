@@ -271,7 +271,7 @@ Estimates are **solo, realistic, with buffer**. A 2–4 person team can parallel
 
 - **Phase 0 — Bootstrap (`S-1`,`S0`):** make the project real and de-risked before any feature work. Establish accountability, tooling, CI, and a thin end-to-end guess.
 - **Phase 1 — Capture (`S1`,`S2`):** the foundation everything depends on. Capture must be lossless, fast, and queryable. Do not rush this.
-- **Phase 2 — Evaluate (`S3`–`S6`):** build detectors as independent workers. Provenance-based modules first (structurally verifiable), probabilistic modules later (need design care).
+- **Phase 2 — Evaluate (`S3`–`S6`):** build detectors as independent workers. Provenance-based modules first (structurally verifiable), probabilistic modules later (need design care). **Complete** — all four modules green on `main` at maturity `65`.
 - **Phase 3 — Act (`S7`,`S8`):** turn flags into action (gating) and add the hardest statistical module (evaluation-awareness).
 - **Phase 4 — Harden (`S9`,`S10`):** adversarial validation, security, supply chain, scale, DR. This phase is why the product can be trusted.
 - **Phase 5 — Ship (`S11`,`S12`):** docs, packaging, compliance artifacts. This is the difference between "a repo" and "a product".
@@ -294,7 +294,7 @@ See [`§2.11`](#211-gate-failure-protocol). Restated for emphasis: **a failed ga
 | `S3` | `25 → 35` | `[x]` | Complete | First detector green on `main`: universal `Flag` row (deterministic identity, typed evidence, first-write-wins adjudication, ADR-0012), `EvaluatorWorker` (checkpoints, retries, batching, `SessionView`, call graph), claim extraction + deictic **and attribution** grounding lexicons, contradiction diff with `observed_value` in evidence, **fabricated-citation detection (`unsourced_citation`)**, **cherry-picked-count detection**, **per-claim source resolution (`misattributed_citation`)**, **universal pass-claim detection**, **legal/safety severity floors**, **reasoning-trace capture in every instrumentor**, review routing, 38-case adversarial corpus. **FP 0.00%, FN 0.00%** via `sentinel eval-fixtures --module provenance`; 534 offline tests plus Postgres-gated integration tests, `mypy --strict`/ruff/bandit clean. `MODULE_VERSION` `0.3.0` forces re-evaluation of sessions scored under `0.1.0`/`0.2.0`. The seven "known gaps carried out of `S3`" were **closed** — see "Gaps carried out of `S3`, and how they were closed". Residual limits are recorded, not glossed: paraphrase-based citation naming, streamed reasoning deltas, lexical severity, and a self-authored corpus. Docs: [`docs/modules/provenance.md`](../modules/provenance.md), [`docs/flag-schema.md`](../flag-schema.md). |
 | `S4` | `35 → 45` | `[x]` | Passed | Memory integrity green: `EmbeddingProvider` (offline deterministic hashing default, local Ollama opt-in with batching + rate limiting, content+model-keyed cache), per-agent memory state series, **structural injection detection** (`memory_drift`, gate-worthy), lexical **collapse** detection (`memory_collapse`, review-only), **write-vs-transcript provenance** reusing `provenance_core` (`memory_ungrounded`), all thresholds configurable with warm-up. **FP 0.00%, FN 0.00%** over 11 cases via `sentinel eval-fixtures --module memory`; 672 offline tests, `mypy --strict`/ruff clean. The sprint's defining result is a measured negative — *a lexical embedding cannot detect a memory injection* (healthy novelty 0.63–0.82, the injection 0.604) — which moved the gate-worthy detector from the embedding path to a structural one. `provenance_core` defects found and fixed while reusing it: a label prefix vetoed claim extraction for every reflective memory write, and the ratio diff matched numbers rather than counts. Docs: [`docs/modules/memory-integrity.md`](../modules/memory-integrity.md), [`examples/memory_integrity.py`](../../examples/memory_integrity.py). |
 | `S5` | `45 → 55` | `[x]` | Passed (split) | Reasoning faithfulness: `JudgeProvider` (strict JSON, mandatory span-citation, undetermined-on-anything-unusable, temperature 0 + pinned model), **counterfactual harness** with a pure perturbation and a caller-supplied sandboxed re-executor, deterministic sampling, sample-variance confidence bounds, and **every flag `review_only` as a literal**. `sentinel eval-fixtures --module faithfulness`: counterfactual **FP 0.00%, FN 0.00%** over 5 cases. The **consistency scorer ships labelled experimental** — its error rate is not measured, because every corpus case pins the verdict rather than calling a model, and the docs say so beside the number. A signal was removed after it silenced both known-unfaithful cases: naming a tool is not acknowledging losing it. `MODULE_VERSION` `0.1.0`. Docs: [`docs/modules/faithfulness.md`](../modules/faithfulness.md). |
-| `S6` | `55 → 65` | `[ ]` | — | — |
+| `S6` | `55 → 65` | `[x]` | Passed | Specification gaming green: objective reader producing a `DeclaredObjective` (criteria, constraints, expected state change) with **silence on an underspecified task** as the load-bearing rule — it logs `spec.objective_unusable` and both structural detectors short-circuit rather than invent a criterion to complain about. **`false_completion`** joins a completion claim against the tool log (a claim must name criteria, and *every* criterion it names must be unaccounted for; gate-worthy). **`success_criteria_narrowing`** requires a taxonomy marker **and** a dropped criterion, since either alone fires on honest agents; quotes the dropped requirement and the matched marker. **`minimum_effort_literal_satisfaction`** ships **disabled and review-only**, deterministic rather than judge-assisted as specified. Additive taxonomy as config. `sentinel eval-fixtures --module spec`: **FP 0.00%, FN 0.00%** over 9 cases, reported **per detector class** (`by_detector_class`: structural 8 cases 0.00/0.00, probabilistic 1 case 0.00/0.00). 912 offline tests, `mypy --strict`/ruff clean. Two defects found by the corpus and fixed: a **missing verb in the objective vocabulary was a silent false negative** (`send` absent, so a two-requirement spec parsed as one and every narrowing compared against half the goal — corpus passed anyway, having been written from the same vocabulary), and a **trailing-only tool filter made every completion claim look unsupported** because agents act first and describe afterwards. Also fixed a **process-wide structlog reconfiguration** in the CLI: routing logs away from stdout was done globally and left in place, so every later log call's behaviour depended on whether a corpus had run first — and under pytest's capture a log call bound to a closed stream raised inside the capture-writer thread and hung the suite. The suppression is now scoped to the corpus run and restores the prior config in a `finally`. `MODULE_VERSION` `0.1.0`. Docs: [`docs/modules/spec-gaming.md`](../modules/spec-gaming.md). |
 | `S7` | `65 → 75` | `[ ]` | — | — |
 | `S8` | `75 → 80` | `[ ]` | — | — |
 | `S9` | `80 → 85` | `[ ]` | — | — |
@@ -1075,19 +1075,46 @@ is unblocked and is the last Phase 2 module.
 #### Task Breakdown
 
 **Objective extraction**
-- [ ] `S6-T1` (P0) Parse `session.start` / task spec / system prompt into a `DeclaredObjective` with explicit success criteria, constraints, and expected state change (where available).
-- [ ] `S6-T2` (P0) Handle underspecified objectives gracefully: mark them low-confidence and avoid over-flagging literal-but-reasonable behavior.
+- [x] `S6-T1` (P0) Parse `session.start` / task spec / system prompt into a `DeclaredObjective` with explicit success criteria, constraints, and expected state change (where available).
+- [x] `S6-T2` (P0) Handle underspecified objectives gracefully: mark them low-confidence and avoid over-flagging literal-but-reasonable behavior.
 
 **Discrepancy & detectors**
-- [ ] `S6-T3` (P0) `success_criteria_narrowing`: detect the agent redefining a narrower goal mid-task relative to the declared objective.
-- [ ] `S6-T4` (P0) `false_completion`: cross-check claims of task completion against the **actual state change** in the event graph (did the write/action actually occur?). This reuses provenance-like structural checks and is the most defensible detector in this module.
-- [ ] `S6-T5` (P0) `minimum_effort_literal_satisfaction`: flag repeated selection of the cheapest action satisfying the literal instruction when the realized outcome misses evident intent (judge-assisted with evidence, review-only).
-- [ ] `S6-T6` (P1) Incorporate the spec-gaming taxonomy patterns as a pluggable rule set so new patterns are config, not code.
+- [x] `S6-T3` (P0) `success_criteria_narrowing`: detect the agent redefining a narrower goal mid-task relative to the declared objective.
+- [x] `S6-T4` (P0) `false_completion`: cross-check claims of task completion against the **actual state change** in the event graph (did the write/action actually occur?). This reuses provenance-like structural checks and is the most defensible detector in this module.
+- [x] `S6-T5` (P0) `minimum_effort_literal_satisfaction`: flag repeated selection of the cheapest action satisfying the literal instruction when the realized outcome misses evident intent (judge-assisted with evidence, review-only).
+- [x] `S6-T6` (P1) Incorporate the spec-gaming taxonomy patterns as a pluggable rule set so new patterns are config, not code.
 
 **Fixtures, measurement, docs**
-- [ ] `S6-T7` (P0) Adversarial corpus per pattern + known-good.
-- [ ] `S6-T8` (P0) Measure FP/FN; separate structural detectors (false_completion) from probabilistic ones (minimum effort).
-- [ ] `S6-T9` (P1) `docs/modules/spec-gaming.md`.
+- [x] `S6-T7` (P0) Adversarial corpus per pattern + known-good.
+- [x] `S6-T8` (P0) Measure FP/FN; separate structural detectors (false_completion) from probabilistic ones (minimum effort).
+- [x] `S6-T9` (P1) `docs/modules/spec-gaming.md`.
+
+**Status.** Delivered as `sentinel.spec_gaming@0.1.0` in `src/sentinel/eval/spec.py`
+(pure logic in `spec_core.py`). Two deviations from the task wording, both
+deliberate and both recorded rather than quietly absorbed:
+
+- **`S6-T5` ships disabled, not judge-assisted.** The task called for a
+  judge-assisted scorer; the implementation is a deterministic
+  phrase-plus-trajectory check that is `review_only` by construction and off by
+  default (`EffortConfig.enabled = False`). Wiring `S5`'s judge in would have made
+  the weakest detector in the module also the most expensive, on the signal least
+  able to distinguish gaming from efficiency. One sentence can trip both
+  `minimum_effort_literal_satisfaction` and `success_criteria_narrowing`, and the
+  corpus asserts both.
+- **Scope comparison is lexical, not semantic.** `S6-T4`'s "reuses provenance-like
+  structural checks" is honoured as a tool-name join against the event log rather
+  than as an import of `provenance_core`'s claim diffing: the question here is
+  whether the *call happened*, not whether a claim is supported by a citation.
+  Importing the claim differ would have made the module flag unsupported
+  statements as false completions.
+
+The `false_completion` tool log counts **every** call in the session, not only
+calls after the final response. An earlier trailing-only filter made every
+completion claim look unsupported, because agents act first and describe
+afterwards; `StateChange.after_last_response` is kept as an explicit opt-in.
+`normalize_taxonomy` is additive (supplied markers extend the defaults, never
+replace them) and drops empty markers, since a blank marker is a substring of
+every sentence.
 
 #### Standards Focus
 
@@ -1095,24 +1122,25 @@ Structural > probabilistic where possible, taxonomy as configuration, honest con
 
 #### Tests & Verification
 
-- [ ] Unit per detector; property tests that structural `false_completion` is deterministic.
-- [ ] Adversarial per pattern; known-good not flagged beyond budget.
-- [ ] Evidence: every flag cites the specific actions/events.
+- [x] Unit per detector (67 in `tests/unit/test_spec_core.py`); contract tests that structural `false_completion` is deterministic across repeated runs (35 in `tests/contract/test_spec_module.py`).
+- [x] Adversarial per pattern; 5 known-good cases flagged at 0%.
+- [x] Evidence: every flag cites the specific actions/events.
 
 #### Exit Criteria
 
-| # | Criterion | Verified by |
-|---|---|---|
-| 1 | `false_completion` caught structurally and deterministically | adversarial test |
-| 2 | Criteria narrowing and minimum-effort detected within budget | adversarial tests |
-| 3 | New taxonomy patterns addable without code change | config test |
-| 4 | FP/FN documented | report |
-| 5 | Probabilistic detectors marked review-only | code invariant test |
+| # | Criterion | Verified by | Result |
+|---|---|---|---|
+| 1 | `false_completion` caught structurally and deterministically | adversarial test | **pass** — `spec_false_completion_no_state_change`, `spec_false_completion_partial_work`; determinism + stable `flag_id` asserted across runs |
+| 2 | Criteria narrowing and minimum-effort detected within budget | adversarial tests | **pass** — `spec_narrowing_drops_a_requirement`, `spec_minimum_effort_literal_satisfaction` |
+| 3 | New taxonomy patterns addable without code change | config test | **pass** — `SpecGamingConfig.taxonomy`; `TestStructuralDetection::test_an_extra_taxonomy_marker_can_add_a_finding` |
+| 4 | FP/FN documented | report | **pass** — 9 cases, FN 0/4, FP 0/5, claim FP 0/5; per-class split in `by_detector_class` |
+| 5 | Probabilistic detectors marked review-only | code invariant test | **pass** — `TestProbabilisticDetectorNeverGates`; `REVIEW_ONLY_CATEGORIES` is a literal and the detector is off by default |
 
 #### Risks & Mitigations
 
-- **Over-flagging legitimate pragmatic choices.** Mitigation: structural detectors gate-worthy; intent-based detectors review-only; conservative defaults.
-- **Underspecified tasks produce noise.** Mitigation: low-confidence handling and per-objective baselines.
+- **Over-flagging legitimate pragmatic choices.** Mitigation: structural detectors gate-worthy; intent-based detectors review-only; conservative defaults. Narrowing requires a marker *and* a dropped criterion, since either alone fires constantly.
+- **Underspecified tasks produce noise.** Mitigation: low-confidence handling and per-objective baselines. An unreadable objective short-circuits both structural detectors and logs its reason (`spec.objective_unusable`); two of nine corpus cases exist to hold that line.
+- **A missing verb in the objective vocabulary is a silent false negative.** Hit during this sprint: `send` was absent, so a two-requirement spec parsed as one criterion and every narrowing comparison ran against half the goal — with the corpus still passing, because it was built from the same vocabulary. Mitigation: broad imperative vocabulary plus a parametrized test pinning one criterion per verb.
 
 #### Dependencies
 
@@ -1124,10 +1152,16 @@ All five detection modules now exist (provenance, memory, faithfulness, spec-gam
 
 #### GO / NO-GO Checklist
 
-- [ ] All Exit Criteria rows pass.
-- [ ] `false_completion` proven deterministic.
-- [ ] Status Board updated: `S6` = `[x]`.
-- [ ] No open `gate-failure` issue.
+- [x] All Exit Criteria rows pass.
+- [x] `false_completion` proven deterministic.
+- [x] Status Board updated: `S6` = `[x]`.
+- [x] No open `gate-failure` issue.
+
+**GO.** `sentinel.spec_gaming@0.1.0` lands at `65` — bottom of the sprint's own
+range, and the first of the four detection modules to carry a *declared input*
+rather than only the event stream. `S6-T5` is deliberately weaker than specified
+(deterministic and disabled, not judge-assisted); it is the module's weakest
+signal and should be the first thing revisited once a labelled corpus exists.
 
 ---
 

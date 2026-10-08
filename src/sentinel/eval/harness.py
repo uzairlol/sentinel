@@ -77,6 +77,12 @@ class CaseOutcome:
     produced: int
     missing: tuple[str, ...] = ()
     spurious: tuple[str, ...] = ()
+    #: Which kind of detector this case exercises: ``"structural"`` for joins and
+    #: lexicons, ``"probabilistic"`` for anything scored. Reported per class
+    #: (``S6-T8``) because a blended rate hides the thing that matters: a
+    #: probabilistic detector's false positives must not be charged to the
+    #: structural ones, and a clean structural class must not launder a noisy one.
+    detector_class: str = "structural"
 
     @property
     def is_false_negative(self) -> bool:
@@ -164,6 +170,53 @@ class CorpusReport:
         return round(cells["true_positives"] / denominator, 4) if denominator else 1.0
 
     @property
+    def by_detector_class(self) -> dict[str, dict[str, float | int]]:
+        """FP and FN rates per detector class, plus the counts they came from.
+
+        A module can mix a structural detector and a probabilistic one. Averaged
+        into a single rate they look better than they are: 1 spurious flag in 9
+        cases reads as 11% FP, but if it came from the single probabilistic case
+        then the structural detectors are at 0% over 8 cases, and the
+        probabilistic one is at 100% over 1. Only the split shows which detector
+        is the problem, so this is what the corpus gate reads.
+        """
+        report: dict[str, dict[str, float | int]] = {}
+        for outcome in self.outcomes:
+            bucket = report.setdefault(
+                outcome.detector_class,
+                {
+                    "cases": 0,
+                    "expected": 0,
+                    "silent": 0,
+                    "produced": 0,
+                    "false_negatives": 0,
+                    "false_positives": 0,
+                },
+            )
+            bucket["cases"] = int(bucket["cases"]) + 1
+            bucket["expected"] = int(bucket["expected"]) + outcome.expected
+            if not outcome.expected:
+                # Counted rather than derived from `cases - expected`: one case
+                # can carry several expectations, so the subtraction goes
+                # negative and a zero-case class reports a negative FP rate.
+                bucket["silent"] = int(bucket["silent"]) + 1
+            bucket["produced"] = int(bucket["produced"]) + outcome.produced
+            if outcome.is_false_negative:
+                bucket["false_negatives"] = int(bucket["false_negatives"]) + 1
+            if outcome.is_false_positive:
+                bucket["false_positives"] = int(bucket["false_positives"]) + 1
+        for bucket in report.values():
+            expected = int(bucket["expected"])
+            clean = int(bucket["silent"])
+            bucket["false_negative_rate"] = (
+                round(int(bucket["false_negatives"]) / expected, 4) if expected else 0.0
+            )
+            bucket["false_positive_rate"] = (
+                round(int(bucket["false_positives"]) / clean, 4) if clean else 0.0
+            )
+        return report
+
+    @property
     def passed(self) -> bool:
         """Whether the run satisfies the ``S3-T14`` gates."""
         return (
@@ -206,6 +259,7 @@ class CorpusReport:
             "precision": self.precision,
             "recall": self.recall,
             "confusion": self.confusion,
+            "by_detector_class": self.by_detector_class,
             "passed": self.passed,
             "gates": {
                 "max_false_negative_rate": MAX_FALSE_NEGATIVE_RATE,
@@ -249,6 +303,14 @@ class CorpusReport:
             f"  claim FP rate:       {self.claim_false_positive_rate:.2%} "
             f"(gate <= {MAX_CLAIM_FP_RATE:.0%})",
         ]
+        if len(self.by_detector_class) > 1:
+            lines.append("per detector class")
+            for name, stats in sorted(self.by_detector_class.items()):
+                lines.append(
+                    f"  {name:<14} {stats['cases']:>3} case(s)  "
+                    f"FN {float(stats['false_negative_rate']):.2%}  "
+                    f"FP {float(stats['false_positive_rate']):.2%}"
+                )
         for outcome in self.outcomes:
             if outcome.passed:
                 continue
@@ -399,8 +461,71 @@ def _run_faithfulness_corpus() -> CorpusReport:
     return asyncio.run(run())
 
 
+def _run_spec_corpus() -> CorpusReport:
+    """The specification-gaming corpus (``S6-T8``).
+
+    The one probabilistic detector in the module is **enabled only for its own
+    case**, by matching on the case's declared ``detector_class``. Enabling it
+    globally would have every known-good case exercise the weakest rule in the
+    module, and a false positive on an underspecified task would then look like a
+    precision failure of the structural detectors rather than of the one that is
+    supposed to be noisy.
+    """
+    from sentinel.eval.fixtures.spec_corpus import SPEC_CORPUS
+    from sentinel.eval.spec import (
+        MODULE as SPEC_MODULE,
+    )
+    from sentinel.eval.spec import (
+        MODULE_VERSION as SPEC_MODULE_VERSION,
+    )
+    from sentinel.eval.spec import (
+        SpecGamingConfig,
+        SpecGamingEvaluator,
+    )
+    from sentinel.eval.spec_core import EffortConfig
+    from sentinel.store.sqlite import SQLiteEventStore
+
+    async def run() -> CorpusReport:
+        report = CorpusReport(module=SPEC_MODULE, module_version=SPEC_MODULE_VERSION)
+        store = SQLiteEventStore(":memory:")
+        try:
+            for case in SPEC_CORPUS:
+                events = case.events()
+                for event in events:
+                    await store.append(event)
+                evaluator = SpecGamingEvaluator(
+                    store,
+                    settings=SpecGamingConfig(
+                        effort=EffortConfig(enabled=case.detector_class == "probabilistic")
+                    ),
+                )
+                report.outcomes.append(
+                    await _compare_flags(
+                        case.case_id,
+                        case.expect,
+                        await evaluator.evaluate_session(events[0].session_id),
+                        detector_class=case.detector_class,
+                    )
+                )
+        finally:
+            await store.close()
+        if not report.passed:
+            log.warning(
+                "corpus.gate_failed",
+                module=SPEC_MODULE,
+                module_version=SPEC_MODULE_VERSION,
+                failures=report.failures,
+            )
+        return report
+
+    return asyncio.run(run())
+
+
 async def _compare_flags(
-    case_id: str, expect: Sequence[ExpectedFinding], flags: Sequence[Flag]
+    case_id: str,
+    expect: Sequence[ExpectedFinding],
+    flags: Sequence[Flag],
+    detector_class: str = "structural",
 ) -> CaseOutcome:
     """Match produced flags against hand-written expectations.
 
@@ -431,6 +556,7 @@ async def _compare_flags(
         produced=len(produced),
         missing=tuple(missing),
         spurious=tuple(produced[index].claim_contains for index in unmatched),
+        detector_class=detector_class,
     )
 
 
@@ -573,6 +699,7 @@ CORPUS_RUNNERS = {
     "provenance": _run_provenance_corpus,
     "memory": _run_memory_corpus,
     "faithfulness": _run_faithfulness_corpus,
+    "spec": _run_spec_corpus,
 }
 
 

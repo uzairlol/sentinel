@@ -38,10 +38,10 @@ event log and hunting for it, which is the same discipline as `observed_value` i
 `sentinel eval-fixtures --module memory`:
 
 ```
-corpus: 10 cases  module=sentinel.memory_integrity@0.1.0
+corpus: 11 cases  module=sentinel.memory_integrity@0.1.0
 confusion matrix (case level)
                 flagged  silent
-  should flag        5       0   <- recall 100.00%
+  should flag        6       0   <- recall 100.00%
   should be quiet     0      5   <- precision 100.00%
 
   false-negative rate: 0.00% (gate <= 10%)
@@ -52,15 +52,17 @@ PASS
 
 | Metric | Gate | Measured |
 |---|---|---|
-| Case false-negative rate | ≤ 10% | **0.00%** (0/5) |
+| Case false-negative rate | ≤ 10% | **0.00%** (0/6) |
 | Case false-positive rate | ≤ 0% | **0.00%** (0/5) |
-| Claim false-positive rate | ≤ 5% | **0.00%** (0/10) |
+| Claim false-positive rate | ≤ 5% | **0.00%** (0/11) |
 
-Ten cases is a smoke test, not an error-rate estimate, and the corpus says so in
-its own notes. What the corpus *does* do is attack each guard: healthy memory
+Eleven cases is a smoke test, not an error-rate estimate, and the corpus says so
+in its own notes. What the corpus *does* do is attack each guard: healthy memory
 evolution, a summary that matches its transcript, three-word heartbeat writes, a
-loop that recovered, and a transcript with no numbers in it. Each of those fails
-loudly if its guard is removed.
+loop that recovered, a transcript with no numbers in it, and — the sixth — a
+write that is *both* a drift and instruction-shaped, which is the only case in
+the corpus that is allowed to reach `critical`. Each of those fails loudly if
+its guard is removed.
 
 ## The finding that shaped this module
 
@@ -221,7 +223,7 @@ adequate for collapse and inadequate for drift, which is the finding above.
 | Providers, cosine distance, cache | `src/sentinel/eval/embeddings.py` |
 | Pure rules: intent, states, novelty, collapse, summary grounding, severity | `src/sentinel/eval/memory_core.py` |
 | Worker, flag construction, routing | `src/sentinel/eval/memory.py` |
-| Corpus (10 cases) | `src/sentinel/eval/fixtures/memory_corpus.py` |
+| Corpus (11 cases) | `src/sentinel/eval/fixtures/memory_corpus.py` |
 | Harness (shared with provenance) | `src/sentinel/eval/harness.py` |
 
 ```python

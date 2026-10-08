@@ -18,7 +18,11 @@ import asyncio
 import dataclasses
 import json
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
+
+import structlog
 
 from sentinel import __version__
 from sentinel.store.factory import build_store
@@ -73,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     fixtures.add_argument(
         "--module",
         required=True,
-        help="module short name: provenance (S3), memory (S4), faithfulness (S5)",
+        help="module short name: provenance (S3), memory (S4), faithfulness (S5), spec (S6)",
     )
     _add_output_arg(fixtures)
     fixtures.set_defaults(func=_cmd_eval_fixtures)
@@ -163,6 +167,39 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     return int(asyncio.run(_run_replay(args)))
 
 
+@contextmanager
+def _quiet_logs() -> Iterator[None]:
+    """Silence structlog for the duration of a corpus run.
+
+    A corpus run's *only* product is the report. A single ``log.debug`` from a
+    module under measurement lands in the middle of the ``--json`` document and
+    every downstream parser fails on it, so logs are suppressed here rather than
+    in each runner.
+
+    Scoped, and restored in a ``finally``, deliberately: re-configuring structlog
+    process-wide and leaving it that way makes the behaviour of every later call
+    depend on whether a corpus ran first. An earlier version of this did exactly
+    that — it re-bound structlog to the current ``sys.stderr`` with
+    ``cache_logger_on_first_use=False`` — and under pytest's capture that left a
+    log call writing to an already-closed stream, which raised inside the capture
+    writer thread and hung the run.
+
+    The previous configuration is snapshotted and put back verbatim rather than
+    assumed: the restorer's job is to leave the process exactly as it found it,
+    and re-deriving structlog's defaults is not the same as restoring what was
+    there.
+    """
+    previous = structlog.get_config().copy()
+    structlog.configure(
+        logger_factory=structlog.ReturnLoggerFactory(),
+        cache_logger_on_first_use=False,
+    )
+    try:
+        yield
+    finally:
+        structlog.configure(**previous)
+
+
 def _cmd_eval_fixtures(args: argparse.Namespace) -> int:
     """``sentinel eval-fixtures --module provenance|memory`` (``S3-T13``/``S4-T12``).
 
@@ -179,7 +216,8 @@ def _cmd_eval_fixtures(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    report = run_module_corpus(args.module)
+    with _quiet_logs():
+        report = run_module_corpus(args.module)
     if args.json or args.pretty:
         _emit_json(args, report.to_dict())
     else:
