@@ -291,8 +291,8 @@ See [`§2.11`](#211-gate-failure-protocol). Restated for emphasis: **a failed ga
 | `S0` | `0 → 5` | `[x]` | Passed | Vertical slice green on `main`: event envelope, session/raw-`instrument_ollama_call` capture, SQLite store, `sentinel replay` CLI, E2E vs respx-stubbed Ollama. 31 tests / 99.3% coverage, `mypy --strict` clean, `v0.0.2` tagged. |
 | `S1` | `5 → 15` | `[x]` | Passed | Instrumentation layer core green on `main`: event taxonomy + INV-3 refs, registry/config, capture worker (bounded queue, fail-open, redaction), LangChain + LangGraph + raw-Ollama/OpenAI-compat + generic `trace` + memory adapters, call-graph query helper. 115 tests / 95.3% coverage, `mypy --strict`/ruff/format/pre-commit clean, `v0.0.3` tagged. `S1-T15` sampling and `S1-T16` streaming caps deferred to `S2`. |
 | `S2` | `15 → 25` | `[x]` | Passed | Event store hardening green on `main`: Alembic migrations, Postgres store (batched append, streaming replay, call graph, session listing, health, gap detection, keyset retention prune with tombstones), SQLite/Postgres parity contract, 1M-event losslessness gate, truncation (`S1-T16`) + sampling (`S1-T15`), least-privilege DB roles + compose reference stack. 190 tests / 92.4% coverage, `mypy --strict`/ruff/bandit clean; `S2-T19` backup/restore smoke skips where `pg_dump`/`psql` are absent (runs in CI with tooling). |
-| `S3` | `25 → 35` | `[x]` | Complete | First detector green on `main`: universal `Flag` row (deterministic identity, typed evidence, first-write-wins adjudication, ADR-0012), `EvaluatorWorker` (checkpoints, retries, batching, `SessionView`, call graph), claim extraction + deictic **and attribution** grounding lexicons, contradiction diff with `observed_value` in evidence, **fabricated-citation detection (`unsourced_citation`)**, **cherry-picked-count detection**, **legal/safety severity floors**, review routing, 28-case adversarial corpus covering all three named failure modes. **FP 0.00%, FN 0.00%** via `sentinel eval-fixtures --module provenance`; 474 offline tests at 91% coverage plus 114 integration tests (0 skipped) with the Postgres-only gate at 95% via `.coveragerc.postgres`, `mypy --strict`/ruff/bandit clean. `MODULE_VERSION` `0.2.0` forces re-evaluation of sessions scored under `0.1.0`. Residual limits are recorded, not glossed: per-claim source→tool-call matching, trace capture, and semantic cherry-picking remain open — see "Known gaps carried out of `S3`". Docs: [`docs/modules/provenance.md`](../modules/provenance.md), [`docs/flag-schema.md`](../flag-schema.md). |
-| `S4` | `35 → 45` | `[ ]` | — | — |
+| `S3` | `25 → 35` | `[x]` | Complete | First detector green on `main`: universal `Flag` row (deterministic identity, typed evidence, first-write-wins adjudication, ADR-0012), `EvaluatorWorker` (checkpoints, retries, batching, `SessionView`, call graph), claim extraction + deictic **and attribution** grounding lexicons, contradiction diff with `observed_value` in evidence, **fabricated-citation detection (`unsourced_citation`)**, **cherry-picked-count detection**, **per-claim source resolution (`misattributed_citation`)**, **universal pass-claim detection**, **legal/safety severity floors**, **reasoning-trace capture in every instrumentor**, review routing, 38-case adversarial corpus. **FP 0.00%, FN 0.00%** via `sentinel eval-fixtures --module provenance`; 534 offline tests plus Postgres-gated integration tests, `mypy --strict`/ruff/bandit clean. `MODULE_VERSION` `0.3.0` forces re-evaluation of sessions scored under `0.1.0`/`0.2.0`. The seven "known gaps carried out of `S3`" were **closed** — see "Gaps carried out of `S3`, and how they were closed". Residual limits are recorded, not glossed: paraphrase-based citation naming, streamed reasoning deltas, lexical severity, and a self-authored corpus. Docs: [`docs/modules/provenance.md`](../modules/provenance.md), [`docs/flag-schema.md`](../flag-schema.md). |
+| `S4` | `35 → 45` | `[x]` | Passed | Memory integrity green: `EmbeddingProvider` (offline deterministic hashing default, local Ollama opt-in with batching + rate limiting, content+model-keyed cache), per-agent memory state series, **structural injection detection** (`memory_drift`, gate-worthy), lexical **collapse** detection (`memory_collapse`, review-only), **write-vs-transcript provenance** reusing `provenance_core` (`memory_ungrounded`), all thresholds configurable with warm-up. **FP 0.00%, FN 0.00%** over 11 cases via `sentinel eval-fixtures --module memory`; 672 offline tests, `mypy --strict`/ruff clean. The sprint's defining result is a measured negative — *a lexical embedding cannot detect a memory injection* (healthy novelty 0.63–0.82, the injection 0.604) — which moved the gate-worthy detector from the embedding path to a structural one. `provenance_core` defects found and fixed while reusing it: a label prefix vetoed claim extraction for every reflective memory write, and the ratio diff matched numbers rather than counts. Docs: [`docs/modules/memory-integrity.md`](../modules/memory-integrity.md), [`examples/memory_integrity.py`](../../examples/memory_integrity.py). |
 | `S5` | `45 → 55` | `[ ]` | — | — |
 | `S6` | `55 → 65` | `[ ]` | — | — |
 | `S7` | `65 → 75` | `[ ]` | — | — |
@@ -700,18 +700,18 @@ A trustworthy, queryable, production-grade event store. This is the **MVP-ready 
 - [x] `S3-T4` (P1) Determinism requirement: same inputs + same module version → identical flags (needed for reproducible FP/FN and for replay).
 
 **Claim extraction**
-- [x] `S3-T5` (P0) Extraction pass over `llm.response` / reasoning traces: classify spans as `grounded_claim` (cites a tool/retrieval/source), `numeric_claim`, or `ungrounded`. Start rule/template-based, then a pluggable small-model classifier behind an interface. **The rule/template extractor, the `ClaimExtractor` protocol (tested by injecting a non-default extractor end to end), and reasoning-trace reading all ship.** `Claim.source_attributed` records whether a claim names a source, which is the `grounded_claim` / `ungrounded` distinction this task asks for, keyed off `ClaimKind` for the value shape. *One dependency is external:* no instrumenter records a reasoning trace yet (`S1` capture gap), so `reasoning_text_of` reads `reasoning` / `reasoning_content` / `thinking` / `thought` at the payload and nested-message level and currently returns `""` — the seam is tested by hand-built payloads, so closing the capture gap is a capture change and not a module change. No model-backed extractor exists; the protocol is the seam one would slot into.
+- [x] `S3-T5` (P0) Extraction pass over `llm.response` / reasoning traces: classify spans as `grounded_claim` (cites a tool/retrieval/source), `numeric_claim`, or `ungrounded`. Start rule/template-based, then a pluggable small-model classifier behind an interface. **The rule/template extractor, the `ClaimExtractor` protocol (tested by injecting a non-default extractor end to end), and reasoning-trace reading all ship.** `Claim.source_attributed` records whether a claim names a source, which is the `grounded_claim` / `ungrounded` distinction this task asks for, keyed off `ClaimKind` for the value shape. *The external dependency is now closed:* every instrumentor lifts the reasoning trace out of the provider body and writes it under an explicit `reasoning` key, so `reasoning_text_of` returns a real trace rather than `""`. See "Gaps carried out of `S3`, and how they were closed" (gap 3). Still no model-backed extractor; the protocol is the seam one would slot into.
 - [x] `S3-T6` (P0) Normalize each grounded claim to a structured form: `{claim_text, claimed_source, claimed_value?}`. **All three ship.** `claim_text` is the fragment, `claimed_value` is the normalized `Value`, and `claimed_source` is `Claim.source_attributed` — the source noun phrase the claim names ("the audit report", "Acme"), captured by the attribution lexicon and carried into `Flag.details` so a reviewer sees *which* document was claimed.
 - [x] `S3-T7` (P1) Handle "implicit grounding" language: "according to the document", "the search returned", "the API shows", etc. — a maintained lexicon with tests. **Both lexicons ship and both are tested.** The deictic one resolves a reference against a value in the evidence (21 phrases). The attribution one is a closed verb set (26 verbs: "states", "returned", "lists", …) plus strong and weak introducers, and returns the *named source* rather than a boolean. The split matters: weak introducers (`in`, `from`, `based on`) require a determiner so "in 2023" stays a date, and proper nouns are matched case-sensitively so "$49 per month" is not read as an attribution to "month".
 
 **Provenance diff**
-- [x] `S3-T8` (P0) `provenance_diff(session, claims, call_graph)`: for each claim, find the referenced tool call; if none exists → flag `ungrounded_claim`; if one exists but the returned value disagrees → flag `contradicted_claim` (with the actual observed value in evidence). **All three outcomes ship as `gather_evidence` + `diff_claim` + the new `unsourced_citation` category** (there is deliberately no symbol named `provenance_diff`; `diff_claim` is the diff). Per-claim source resolution works by way of `DiffContext`: `explicit` is the results the response *cited* (`RefKind.GROUNDS`), and a claim that names a source while citing none is `unsourced` when — and only when — the session proves citations are recorded at all. That session-level precondition (`_citations_recorded`) is what makes a fabricated citation provable rather than a guess; without it, "cites nothing" is indistinguishable from a framework that never emits citations. The unsourced rule runs **last**, so it can only reclassify a claim that was already going to be flagged and can never turn silence into a new flag. 7 contradiction cases plus 2 fabricated-citation cases, `observed_value` in evidence marked `countervailance`.
+- [x] `S3-T8` (P0) `provenance_diff(session, claims, call_graph)`: for each claim, find the referenced tool call; if none exists → flag `ungrounded_claim`; if one exists but the returned value disagrees → flag `contradicted_claim` (with the actual observed value in evidence). **All three outcomes ship as `gather_evidence` + `diff_claim` + the `unsourced_citation` category** (there is deliberately no symbol named `provenance_diff`; `diff_claim` is the diff). Per-claim source resolution works by way of `DiffContext`: `explicit` is the results the response *cited* (`RefKind.GROUNDS`), `sources` carries each result's identity and per-response citation flag, and a claim that names a source while citing none is `unsourced` — or `misattributed` when the turn cited something *else* — when, and only when, the session proves citations are recorded at all. That session-level precondition (`_citations_recorded`) is what makes a fabricated citation provable rather than a guess; without it, "cites nothing" is indistinguishable from a framework that never emits citations. Both verdicts run **last**, so they can only reclassify a claim that was already going to be flagged and can never turn silence into a new flag. `resolve_source` declines rather than guesses: a name with no distinctive word, or one matching several results, can never become a flag. 8 contradiction cases, 2 fabricated-citation cases and 2 misattributed-citation cases, `observed_value` in evidence marked `countervailance`.
 - [x] `S3-T9` (P0) Severity mapping: ungrounded claim about a consequential value (money, legal, safety, quantity) escalates severity; default severity `medium`. **All four domains are modelled.** Kind and verdict still set the base severity (`numeric`/`boolean`/`set` outrank `date`/`duration`/`weekday`; contradiction outranks ungrounded), and `SAFETY_LEXICON` then applies a **floor** for the claim's subject: 22 safety terms (`medication`, `contraindicated`, `pregnancy`, `mortality`, …) at `high` and 26 legal/regulatory terms (`regulator`, `litigation`, `compliance`, `licence`, `iso 27001`, …) at `medium`. A floor rather than an override, so a contradicted safety claim is not inflated beyond what its evidence warrants. A cherry-picked count is `high` whatever its kind — reporting a favourable count over a set the source shows was larger is a misrepresentation, not a rounding error.
 - [x] `S3-T10` (P1) Confidence estimation: combine extraction confidence and diff certainty; low-confidence flags are marked for human review rather than gated.
 - [x] `S3-T11` (P1) Make the whole path **reusable** as `sentinel.eval.provenance_core` so `S4` imports it (this is the shared mechanism noted in the design doc).
 
 **Adversarial fixtures & measurement**
-- [x] `S3-T12` (P0) Build a fixture corpus: **known-good** sessions (accurate citations) and **known-bad** sessions (fabricated citations, contradicted values, cherry-picked numbers). Store as replayable event sequences. **28 replayable cases ship: 12 known-good and 16 known-bad, covering all three named categories.** Fabricated citations: `fabricated_citation_no_source` (a named report, no tool call, and a prior turn proving the session records citations) and `fabricated_citation_uncited_among_tools` (a tool *did* run; the agent cited something else). Cherry-picked numbers: `cherry_picked_count` (four checks ran, the agent reported "2 of 3 passed"). Four known-good cases guard the false-positive side and are load-bearing rather than filler — `grounded_count_reported_whole` (an honest denominator, so the cherry-pick rule cannot just say "a count was stated"), `grounded_count_verbatim` (`12 of 20 seats`, a count shape with no enumerable set), `grounded_attributed_and_cited` (attribution *and* a real citation, so the unsourced rule cannot just say "a source was named"), and the pre-existing `grounded_multi_claim_mixed`. The `prior_citing_turn` fixture field is what makes a fabricated citation provable rather than inferred.
+- [x] `S3-T12` (P0) Build a fixture corpus: **known-good** sessions (accurate citations) and **known-bad** sessions (fabricated citations, contradicted values, cherry-picked numbers). Store as replayable event sequences. **38 replayable cases ship: 14 known-good and 24 known-bad, covering every named category.** Fabricated citations: `fabricated_citation_no_source` (a named report, no tool call, and a prior turn proving the session records citations) and `fabricated_citation_uncited_among_tools` (a tool *did* run; the agent cited something else). Cherry-picked numbers: `cherry_picked_count` (four checks ran, the agent reported "2 of 3 passed"). Four known-good cases guard the false-positive side and are load-bearing rather than filler — `grounded_count_reported_whole` (an honest denominator, so the cherry-pick rule cannot just say "a count was stated"), `grounded_count_verbatim` (`12 of 20 seats`, a count shape with no enumerable set), `grounded_attributed_and_cited` (attribution *and* a real citation, so the unsourced rule cannot just say "a source was named"), and the pre-existing `grounded_multi_claim_mixed`. The `prior_citing_turn` fixture field is what makes a fabricated citation provable rather than inferred.
 - [x] `S3-T13` (P0) Harness: `sentinel eval-fixtures --module provenance` prints a confusion matrix; compute FP/FN rates.
 - [x] `S3-T14` (P0) Set a gate threshold: FP rate ≤ target (e.g. ≤ 5% on the corpus) and FN rate ≤ target (e.g. ≤ 10%) before the module is considered usable; otherwise tune.
 - [x] `S3-T15` (P1) Human-review routing: flags with confidence below threshold never gate, they queue for review (feeds `S7`).
@@ -737,8 +737,8 @@ Flag/evidence schema design, worker idempotency, deterministic evaluators, adver
 | # | Criterion | Verified by | Result |
 |---|---|---|---|
 | 1 | The flag schema is implemented, persisted, and documented | schema test + doc | Pass — [`docs/flag-schema.md`](../flag-schema.md), [`docs/adr/0012`](../adr/0012-flag-schema.md) |
-| 2 | Fabricated-citation and contradicted-value sessions are caught without manual intervention | adversarial tests | Pass — contradicted-value sessions (7 corpus cases) and fabricated citations (2 corpus cases: no source at all, and a real tool plus an uncited one). Cherry-picked counts are caught too (1 case). |
-| 3 | FP ≤ 5%, FN ≤ 10% on the corpus (documented actual numbers) | `eval-fixtures` report | Pass — **FP 0.00%, FN 0.00%**, claim FP 0.00% on 28 cases, including the 4 known-good cases that specifically guard the new rules. Meaningful only over the corpus that exists: 28 hand-built sessions is a smoke test, not an estimate of the module's real-world error rate. |
+| 2 | Fabricated-citation and contradicted-value sessions are caught without manual intervention | adversarial tests | Pass — contradicted-value sessions (8 corpus cases), fabricated citations with nothing cited (2), misattributed citations against a real cited source (2), narrowed counts (1) and universal pass claims over a skipped or failed item (2). |
+| 3 | FP ≤ 5%, FN ≤ 10% on the corpus (documented actual numbers) | `eval-fixtures` report | Pass — **FP 0.00%, FN 0.00%**, claim FP 0.00% on 38 cases, including **7 known-good guard cases that exist only to attack a specific rule** (honest denominator, non-enumerable count, attributed-and-cited, named-source-is-the-cited-one, generic name, ambiguous name, prose status words). Meaningful only over the corpus that exists: 38 hand-built sessions is a smoke test, not an estimate of the module's real-world error rate. |
 | 4 | Worker is idempotent and restart-safe | idempotency test | Pass — re-running yields identical `flag_id`s, zero new rows |
 | 5 | `provenance_core` is a reusable, tested library boundary | code review | Pass — no reverse dependency on `sentinel.instrument` (INV-1 cold-subprocess test). No `S4` consumer exists yet; that is `S4`'s job, not a defect here. |
 | 6 | Every flag carries complete, valid evidence refs | test | Pass — non-empty, ULID-checked, role-typed, no duplicate pairs |
@@ -756,12 +756,12 @@ Flag/evidence schema design, worker idempotency, deterministic evaluators, adver
 
 The flag schema, worker framework, and provenance core are now reusable by all later modules. `S4` reuses them directly.
 
-**Measured on the corpus** (`uv run sentinel eval-fixtures --module provenance`, 28 cases): 16 true positives, 0 false negatives, 0 false positives, 12 true negatives — case FP `0.00%`, FN `0.00%`, claim FP `0.00%`, against budgets of ≤ 5% FP and ≤ 10% FN. Rule-by-rule breakdown, the severity model, and the known blind spots are in [`docs/modules/provenance.md`](../modules/provenance.md). The numbers are exact for the corpus that exists; 28 hand-built sessions cover all three named failure categories but bound nothing about the module's error rate on real traffic.
+**Measured on the corpus** (`uv run sentinel eval-fixtures --module provenance`, 38 cases): 24 true positives, 0 false negatives, 0 false positives, 14 true negatives — case FP `0.00%`, FN `0.00%`, claim FP `0.00%`, against budgets of ≤ 5% FP and ≤ 10% FN. Rule-by-rule breakdown, the severity model, and the known blind spots are in [`docs/modules/provenance.md`](../modules/provenance.md). The numbers are exact for the corpus that exists; 38 hand-built sessions cover every named failure category but bound nothing about the module's error rate on real traffic.
 
 #### GO / NO-GO Checklist
 
 - [x] All Exit Criteria rows pass. *(6 of 6. The two rows that were partial — fabricated citations and cherry-picked numbers — now have both a rule and corpus cases, so the evidence is behavioural rather than asserted.)*
-- [x] FP/FN measured and within budget on the corpus. *(FP 0.00%, FN 0.00% over 28 cases, claim FP 0.00%. The budget is met; the corpus grew to cover every named category, which is a stronger claim than the 22-case run was, but still not an error-rate estimate.)*
+- [x] FP/FN measured and within budget on the corpus. *(FP 0.00%, FN 0.00% over 38 cases, claim FP 0.00%. The budget is met; the corpus grew to cover every named category and added seven guard cases that attack individual rules, which is a stronger claim than the 22-case run was, but still not an error-rate estimate.)*
 - [x] The flag schema is declared stable (or an ADR records changes). *(ADR-0012, `schema_version = 0.1`.)*
 - [x] Status Board updated: `S3` = `[x]`.
 - [x] No open `gate-failure` issue.
@@ -771,19 +771,26 @@ The flag schema, worker framework, and provenance core are now reusable by all l
 
 `MODULE_VERSION` moved `0.1.0 → 0.2.0` with these rules, which is what makes the idempotency key change and forces sessions evaluated under the old rules to be re-evaluated rather than silently keeping stale verdicts.
 
-#### Known gaps carried out of `S3`
+**Gaps carried out of `S3`, and how they were closed**
 
-Ordered by how much they matter. None is a regression; all are absences.
+`S3` shipped with seven recorded gaps. Four were absences of rules or of data and are now closed; two were design limits that closing would have made worse; one was a statement about how much the corpus is worth, which only more corpus can answer.
 
-1. **Source resolution is proven only for the fabricated case** (`S3-T6`, `S3-T8`). A claim that names a source and cites nothing at all is caught. A claim that names source A while citing source B — where both tool calls genuinely ran — is not yet distinguished, because nothing matches the named noun phrase to a specific tool result. The corpus has no case for it, so this is a gap in coverage and in the rule, not a known false-positive rate.
-2. **The unsourced rule is session-level, not claim-level** (`S3-T8`). It fires when the response cites nothing, which is why it runs last and can only reclassify a claim already headed for a flag. A turn that cites correctly in one sentence and fabricates in another will be missed until the resolution in item 1 lands.
-3. **No reasoning trace is ever captured** (`S3-T5`, `S1`). `reasoning_text_of` reads `reasoning` / `reasoning_content` / `thinking` / `thought` at the payload and nested-message level, and no instrumenter writes any of those keys, so it returns `""` today. The seam is tested with hand-built payloads; closing this is a capture change in `S1`, not a module change.
-4. **Cherry-picking is detected structurally, not semantically** (`S3-T12`). The rule compares a claimed denominator against the number of items it can enumerate from the cited output. "2 of 3 passed" is caught; "all checks passed" when one check was skipped, or a favourable aggregate of an unfavourable table, are not.
-5. **Severity escalation is lexical** (`S3-T9`). `SAFETY_LEXICON` matches subject words, so "the deadline is 30 April" escalates on "deadline" and "the meeting is 30 April" does not. That is a defensible floor, not a risk model.
-6. **28 cases is a smoke test** (`S3-T13`). Zero false positives over 28 hand-built sessions says the rules do not fire on the cases someone thought of. It is not evidence about real traffic.
-7. **No `S4` consumer of `provenance_core`** yet. The Postgres store is no longer unmeasured: it is gated at 95% by the `integration-postgres` job via `.coveragerc.postgres`, and the `sentinel_reviewer` least-privilege role is now proven against a real database rather than asserted.
+| # | Gap | Status |
+|---|---|---|
+| 1 | A claim naming source A while the turn cites source B, both of which ran, was not distinguished | **Closed.** `Source` carries each result's identity and per-response citation flag; `resolve_source` matches the named phrase against tool names and output text. A name resolving to an uncited result, or to nothing, is `MISATTRIBUTED`. |
+| 2 | The unsourced rule was session-level, so a turn citing correctly in one sentence and fabricating in another was missed | **Closed.** Both verdicts are decided per claim. `citations_recorded` remains a *session*-level precondition — that half is about whether the instrumentation emits citations at all, and collapsing it would re-open the false-positive source it exists to prevent. |
+| 3 | No instrumenter recorded a reasoning trace, so `reasoning_text_of` always returned `""` | **Closed** as a capture change, as predicted. LangChain, the OpenAI-compatible transport and raw Ollama lift the trace out of the provider body and write it under an explicit `reasoning` key, capped. A contract test runs the real transport and asserts the key the transport writes is the key the evaluator reads. |
+| 4 | Cherry-picking was detected only via a narrowed denominator; "all checks passed" over a run with a skipped check was not caught | **Closed** for the universal form. `ClaimKind.UNIVERSAL` is settled against per-item statuses, so `skipped` refutes a pass claim — the case that hides best in a summary line. A *favourable aggregate of an unfavourable table* is **not** closed and is not claimed to be: it needs a notion of what a result was for, which is a modelling question, and a rule that guessed at it would spend the zero-FP budget to buy recall nobody asked for. |
+| 5 | Severity escalation is lexical ("deadline" escalates, "termination" does not) | **Not a defect. Deliberately not "fixed".** `SAFETY_LEXICON` is a *floor* over the claim's kind, and the kind-based ladder underneath it is the real severity model. Replacing lexical matching with a learned or judged one would put a probabilistic component in the path of every flag's severity — the opposite of the structural-first standard this module exists to hold. The limit is documented as a floor, not a risk model. |
+| 6 | 28 cases is a smoke test, not an error-rate estimate | **Partly addressed, honestly bounded.** The corpus is now 38 cases including **seven guard cases that exist only to attack a specific rule**, which is what turned 28 hand-built sessions into a gate with teeth. It is still self-authored and still bounds nothing about real traffic. Sizing the true rate needs a labelled production sample in `S13`. |
+| 7 | `provenance_core` had no `S4` consumer | **Closed** by `S4`, which imports `diff_claim`, `Source` and the lexicons rather than reimplementing "grounded". |
 
-**How to close the rest honestly:** items 1–2 are one piece of work (match the named source phrase to a tool result, then flag per claim rather than per turn) and should ship with a corpus case *and* the rule together, for the same reason the last round did: fixtures without a rule immediately fail the FN gate. Item 3 is a capture gap that belongs to `S1`. Item 4 needs a notion of what a result was *for*, which is a modelling question rather than a rule.
+Two defects surfaced while closing these, both worth recording because both were the kind that pass a casual test:
+
+- The source-resolution word filter discarded tokens shorter than three characters, which threw away `q3` and `eu` — precisely the tokens that tell one quarter's report from another's. "The Q3 compliance report" would have matched *both* quarters, become `AMBIGUOUS`, and declined to flag the exact case the rule exists for. Replaced with an explicit function-word list.
+- Item-status reading initially accepted any word adjacent to a status word, so prose containing "no", "done" or "missing" built a fake enumeration. Now an identifier shape or an explicit separator is required.
+
+`MODULE_VERSION` moved `0.2.0 → 0.3.0` for the source-resolution and universal-claim rules, which is what makes the idempotency key change and forces sessions evaluated under the old rules to be re-evaluated rather than silently keeping stale verdicts.
 
 ---
 
@@ -805,26 +812,26 @@ Ordered by how much they matter. None is a regression; all are absences.
 #### Task Breakdown
 
 **Embedding infrastructure**
-- [ ] `S4-T1` (P0) `EmbeddingProvider` interface; default implementation calls local Ollama (`/api/embeddings`); model name configurable; deterministic for a fixed model/version.
-- [ ] `S4-T2` (P0) Embedding cache keyed by content hash + model id; persistent in the store or a local table; invalidated on model change.
-- [ ] `S4-T3` (P1) Batch embedding + rate limiting so the worker doesn't starve the host's Ollama.
+- [x] `S4-T1` (P0) `EmbeddingProvider` interface; default implementation calls local Ollama (`/api/embeddings`); model name configurable; deterministic for a fixed model/version.
+- [x] `S4-T2` (P0) Embedding cache keyed by content hash + model id; persistent in the store or a local table; invalidated on model change.
+- [x] `S4-T3` (P1) Batch embedding + rate limiting so the worker doesn't starve the host's Ollama.
 
 **Drift & collapse metrics**
-- [ ] `S4-T4` (P0) Maintain a per-agent/normalized memory state series from `memory.write`/`memory.read` events.
-- [ ] `S4-T5` (P0) Drift metric: cosine distance between successive memory snapshots; flag `memory_drift` when the jump exceeds a configurable threshold within a single update.
-- [ ] `S4-T6` (P0) Homogenization metric: lexical diversity/repetition ratio trend (and/or pairwise embedding similarity trend) across successive states; flag `memory_collapse` on sustained convergence to a stale loop.
-- [ ] `S4-T7` (P0) Threshold policy: per-agent baselines with warm-up (don't flag during cold start); document how baselines adapt.
-- [ ] `S4-T8` (P1) Severity mapping: injected-update drift is `high`/`critical`; gradual collapse is `medium`.
+- [x] `S4-T4` (P0) Maintain a per-agent/normalized memory state series from `memory.write`/`memory.read` events.
+- [x] `S4-T5` (P0) Drift metric: cosine distance between successive memory snapshots; flag `memory_drift` when the jump exceeds a configurable threshold within a single update.
+- [x] `S4-T6` (P0) Homogenization metric: lexical diversity/repetition ratio trend (and/or pairwise embedding similarity trend) across successive states; flag `memory_collapse` on sustained convergence to a stale loop.
+- [x] `S4-T7` (P0) Threshold policy: per-agent baselines with warm-up (don't flag during cold start); document how baselines adapt.
+- [x] `S4-T8` (P1) Severity mapping: injected-update drift is `high`/`critical`; gradual collapse is `medium`.
 
 **Write provenance**
-- [ ] `S4-T9` (P0) Cross-check every `memory.write` that is a summary/reflection against the transcript and call log it claims to summarize, using `sentinel.eval.provenance_core`. Flag `memory_ungrounded` when the summary asserts events absent from the underlying session.
-- [ ] `S4-T10` (P1) Distinguish "summarizing/reflecting" writes from raw fact persistence; apply the heavy check only to the former, the drift check to the latter.
+- [x] `S4-T9` (P0) Cross-check every `memory.write` that is a summary/reflection against the transcript and call log it claims to summarize, using `sentinel.eval.provenance_core`. Flag `memory_ungrounded` when the summary asserts events absent from the underlying session.
+- [x] `S4-T10` (P1) Distinguish "summarizing/reflecting" writes from raw fact persistence; apply the heavy check only to the former, the drift check to the latter.
 
 **Fixtures, measurement, docs**
-- [ ] `S4-T11` (P0) Adversarial corpus: (a) single injected malicious memory update; (b) gradual collapse over many updates; (c) fabricated reflective summary. Plus a known-good corpus.
-- [ ] `S4-T12` (P0) Measure FP/FN; set module budgets; document actual numbers.
-- [ ] `S4-T13` (P1) `docs/modules/memory-integrity.md` (methodology, thresholds, limitations, embedding model assumptions).
-- [ ] `S4-T14` (P1) Example: a corrupted-update session produces a `memory_drift` flag and a `memory_ungrounded` flag.
+- [x] `S4-T11` (P0) Adversarial corpus: (a) single injected malicious memory update; (b) gradual collapse over many updates; (c) fabricated reflective summary. Plus a known-good corpus.
+- [x] `S4-T12` (P0) Measure FP/FN; set module budgets; document actual numbers.
+- [x] `S4-T13` (P1) `docs/modules/memory-integrity.md` (methodology, thresholds, limitations, embedding model assumptions).
+- [x] `S4-T14` (P1) Example: a corrupted-update session produces a `memory_drift` flag and a `memory_ungrounded` flag.
 
 #### Standards Focus
 
@@ -832,22 +839,23 @@ Determinism vs stochastic embeddings (pin model versions), local-first processin
 
 #### Tests & Verification
 
-- [ ] Unit: drift/collapse metrics on synthetic vector sequences.
-- [ ] Integration: local Ollama embeddings, cached, deterministic across runs.
-- [ ] Adversarial: all three adversarial fixture families caught within budget; known-good not flagged.
-- [ ] Perf: embedding drift p95 < 1 s per memory write at target load.
-- [ ] Idempotency and warm-up correctness.
+- [x] Unit: drift/collapse metrics on synthetic vector sequences.
+- [x] Integration: local Ollama embeddings, cached, deterministic across runs — both endpoint shapes, malformed bodies, batching, and rate limiting are covered against a
+espx transport.
+- [x] Adversarial: all three adversarial fixture families caught within budget; known-good not flagged.
+- [~] Perf: embedding drift p95 < 1 s per memory write at target load. *Not measured yet.* The default provider needs no network and is a single batched call per session, so the budget is comfortably met by construction; the Ollama path's p95 depends on the deployment's model server and is left to S10 load testing rather than measured on a machine that has no local Ollama. Recorded as open, not claimed as met.
+- [x] Idempotency and warm-up correctness.
 
 #### Exit Criteria
 
-| # | Criterion | Verified by |
-|---|---|---|
-| 1 | Injected memory update is flagged `high`/`critical` | adversarial test |
-| 2 | Gradual collapse is flagged without also flagging healthy evolution | adversarial + known-good |
-| 3 | Fabricated reflective summary is flagged via `provenance_core` | adversarial test |
-| 4 | FP/FN measured and within budget | corpus report |
-| 5 | Embeddings are local, cached, and reproducible | integration test |
-| 6 | Thresholds fully configurable, with warm-up documented | config test |
+| # | Criterion | Verified by | Result |
+|---|---|---|---|
+| 1 | Injected memory update is flagged `high`/`critical` | adversarial test | Pass — 2 cases, both `high`, caught by the **structural** path with no embedding model involved. `critical` is reserved for an injected write that also contradicts the session. |
+| 2 | Gradual collapse is flagged without also flagging healthy evolution | adversarial + known-good | Pass — `memory_collapse_loop` flagged `medium` and review-only; 5 known-good cases stay silent, including one where a loop *recovered*. |
+| 3 | Fabricated reflective summary is flagged via `provenance_core` | adversarial test | Pass — 3 summary cases, including one producing `memory_drift` **and** `memory_ungrounded` in the same session, which is the only case proving the two checks are independent. |
+| 4 | FP/FN measured and within budget | corpus report | Pass — **FP 0.00%, FN 0.00%**, claim FP 0.00% over 11 cases. |
+| 5 | Embeddings are local, cached, and reproducible | integration test | Pass — `HashingEmbeddingProvider` is offline and `hashlib`-keyed, so vectors survive a process restart (Python's `hash()` is salted per process and would change every vector on every restart). Cache keyed by content hash **and** model id, proven not to leak across models. `OllamaEmbeddingProvider` covers both endpoint shapes, malformed bodies, batching and rate limiting. |
+| 6 | Thresholds fully configurable, with warm-up documented | config test | Pass — every threshold lives in `DriftConfig`/`MemoryIntegrityConfig`; tests raise `warmup_writes`, `collapse_similarity` and `min_drift_chars` and assert the corresponding finding disappears, without a release. |
 
 #### Risks & Mitigations
 
@@ -862,14 +870,34 @@ Determinism vs stochastic embeddings (pin model versions), local-first processin
 
 Two provenance-based modules live. Both the flag framework and shared core are proven reusable. `S5` now adds the first probabilistic module.
 
+#### The finding that reshaped this sprint
+
+**A lexical embedding cannot detect a memory injection, and that was measured rather than assumed.** On a healthy session of five unrelated account facts, per-write novelty runs `0.63`-`0.82` — two topically unrelated short texts share almost no vocabulary, so a lexical embedder places them a long way apart, and that range consumes nearly all the headroom cosine distance has. On the *same* session an injected instruction scored `0.604`: *below* the healthy writes it hijacked, because an injection is usually lexically close to the conversation it attacks.
+
+The module was rebuilt around that rather than tuned against it:
+
+* the **gate-worthy detector is structural** — `looks_like_an_injection` asks whether a write is an instruction aimed at the agent rather than a fact about the world, needs no embedding model, is deterministic, and is *identified* rather than measured, so it earns high confidence;
+* the **embedding path corroborates** with a robust z-score against the session's own distribution, as the catch-all for an injection phrased too carefully for the marker list. With the default provider it does not fire, by design rather than by accident; it exists for deployments passing a local semantic model, where healthy novelty sits far lower and a genuine jump has real headroom.
+
+Both the number and the reasoning are pinned in a test (`TestDriftCannotSeeAnInjectionWithALexicalEmbedder`), so a future embedder that changes the answer changes the test before it changes the docs.
+
+Three further things were removed rather than kept because they looked thorough:
+
+* **An absolute novelty floor.** It cannot serve both provider types — a sigma floor that guarded a lexical provider (`0.10`) blocked every semantic one — so the spread floor became a *fraction of the baseline's own median*, which is scale-free.
+* **A distinct-token condition on collapse.** Writing near-identical text three times *necessarily* collapses the type-token ratio, so the pair could never disagree; a gate cannot be half redundant. The ratio is still reported as evidence a reviewer can check, just not used as a threshold to clear.
+* **Claim extraction vetoed by a label.** `"summary:"` sat in the non-assertion list, written for chat prose, and that silently disabled extraction for *every reflective memory write* — precisely what this module exists to check. `is_assertion` now strips a leading label before deciding.
+
+A fourth defect surfaced in `provenance_core` while building this and was fixed there rather than worked around: the ratio diff tested that a claim's numerator and denominator both appeared *somewhere* in the evidence, so a transcript reading "3 of 4 checks passed" plus "12 tickets, 4 due today" made a claim of "4 of 4" look verbatim and supported. The number was really there; the *count* was not. It now matches ratio phrases, and a stated count with a matching denominator but a different numerator is a contradiction.
 #### GO / NO-GO Checklist
 
-- [ ] All Exit Criteria rows pass.
-- [ ] FP/FN measured and within budget.
-- [ ] Local embedding path verified deterministic and cached.
-- [ ] Status Board updated: `S4` = `[x]`.
-- [ ] No open `gate-failure` issue.
-- [ ] If collapse detection cannot separate healthy evolution from collapse within budget → **NO-GO**; descope collapse to "experimental" (ADR) and ship drift + write-provenance only.
+- [x] All Exit Criteria rows pass. *(6 of 6.)*
+- [x] FP/FN measured and within budget. *(FP 0.00%, FN 0.00%, claim FP 0.00% over 11 cases, against budgets of ≤ 0% and ≤ 10%.)*
+- [x] Local embedding path verified deterministic and cached. *(`hashlib`-keyed, so vectors survive a process restart; proven not to leak across model ids; both Ollama endpoint shapes, malformed bodies, batching and rate limiting covered.)*
+- [x] Status Board updated: `S4` = `[x]`.
+- [x] No open `gate-failure` issue.
+- [x] If collapse detection cannot separate healthy evolution from collapse within budget → **NO-GO**; descope collapse to "experimental" (ADR) and ship drift + write-provenance only. *(Not triggered: 0.00% FP over 5 known-good cases, including one where a loop recovered. Collapse ships `review_only` rather than experimental, because convergence is a symptom rather than proof of manipulation.)*
+
+**Verdict: GO.** Three categories, all registered in the flag taxonomy; the two structural checks reuse `provenance_core` rather than reimplementing "grounded"; every threshold is configuration rather than code; and the module is deterministic by construction rather than by assertion. `S5` is unblocked, and it is the first module whose judgement is genuinely probabilistic — which is exactly why this one was worth landing first.
 
 ---
 

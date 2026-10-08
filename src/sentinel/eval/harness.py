@@ -1,11 +1,18 @@
-"""The adversarial-corpus harness and the FP/FN gate (sprint ``S3-T13``/``S3-T14``).
+"""The adversarial-corpus harness and the FP/FN gate (``S3-T13``/``S3-T14``, ``S4-T12``).
 
-The point of the corpus is a *number you can quote*: run every case in
-:mod:`sentinel.eval.fixtures.provenance_corpus` through the real analyzer and
-count what it missed and what it invented. The gate is the exit criterion from
-the sprint plan, so the thresholds live here as named constants that the docs
-and the test suite both read — there is exactly one place where "acceptable"
-is defined.
+The point of a corpus is a *number you can quote*: run every case through the
+real analyzer and count what it missed and what it invented. The gate is the exit
+criterion from the sprint plan, so the thresholds live here as named constants
+that the docs and the test suite both read — there is exactly one place where
+"acceptable" is defined.
+
+Two corpora share this harness, because they answer the same question about
+different modules: :mod:`sentinel.eval.fixtures.provenance_corpus` for
+tool-use grounding, and :mod:`sentinel.eval.fixtures.memory_corpus` for memory
+integrity. They differ in shape — memory cases are a series of writes plus a
+transcript, provenance cases are a tool call and a response — so each has its own
+runner, and both report through :class:`CorpusReport`. Adding the third corpus in
+``S5`` is a new runner, not a new report type.
 
 Metrics:
 
@@ -15,18 +22,20 @@ Metrics:
   flagged claim that does not match the case's expected claim. Over-flagging is
   how a detector gets muted, so it is measured on both the case and the claim.
 
-Determinism is part of the contract: :func:`run_corpus` is pure with respect to
-the corpus, so the same module version always reports the same rates.
+Determinism is part of the contract: the runners are pure with respect to the
+corpus, so the same module version always reports the same rates.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import structlog
 
+from sentinel.eval.fixtures.memory_corpus import MEMORY_CORPUS, MemoryCase
 from sentinel.eval.fixtures.provenance_corpus import CORPUS, CorpusCase, ExpectedFinding
 from sentinel.eval.provenance import MODULE, MODULE_VERSION
 from sentinel.eval.provenance_core import (
@@ -250,7 +259,7 @@ class CorpusReport:
 
 
 def run_case(case: CorpusCase, *, cited: bool | None = None) -> CaseOutcome:
-    """Run one corpus case through the rules and compare to its expectation.
+    """Run one provenance corpus case and compare to its expectation.
 
     ``cited`` controls whether the response cites its tool result, which is how
     the corpus distinguishes "the agent looked and still got it wrong" from "the
@@ -317,20 +326,89 @@ def run_corpus(
     return report
 
 
-#: Modules ``sentinel eval-fixtures --module`` can run: short name -> module id.
-CORPUS_MODULES: dict[str, str] = {"provenance": MODULE}
-
-
-def run_module_corpus(module: str) -> CorpusReport:
-    """Run the corpus behind a module short name (``provenance``).
-
-    The module identity comes from the module itself rather than a literal
-    here, so a report can never claim to have tested a version the module did
-    not ship.
-    """
-    if module not in CORPUS_MODULES:
-        raise KeyError(module)
+def _run_provenance_corpus() -> CorpusReport:
+    """The tool-use grounding corpus."""
     return run_corpus(module=MODULE, module_version=MODULE_VERSION)
+
+
+def _run_memory_corpus() -> CorpusReport:
+    """The memory-integrity corpus (``S4-T12``).
+
+    Built here rather than exported from the memory module so this file stays the
+    one place that knows how a gate is measured.
+    """
+    from sentinel.eval.memory import (
+        MODULE as MEMORY_MODULE,
+    )
+    from sentinel.eval.memory import (
+        MODULE_VERSION as MEMORY_MODULE_VERSION,
+    )
+    from sentinel.eval.memory import (
+        MemoryIntegrityEvaluator,
+    )
+    from sentinel.store.sqlite import SQLiteEventStore
+
+    async def run() -> CorpusReport:
+        report = CorpusReport(module=MEMORY_MODULE, module_version=MEMORY_MODULE_VERSION)
+        store = SQLiteEventStore(":memory:")
+        try:
+            evaluator = MemoryIntegrityEvaluator(store)
+            for case in MEMORY_CORPUS:
+                report.outcomes.append(await _run_memory_case(case, evaluator, store))
+        finally:
+            await store.close()
+        if not report.passed:
+            log.warning(
+                "corpus.gate_failed",
+                module=MEMORY_MODULE,
+                module_version=MEMORY_MODULE_VERSION,
+                failures=report.failures,
+            )
+        return report
+
+    return asyncio.run(run())
+
+
+async def _run_memory_case(case: MemoryCase, evaluator: object, store: object) -> CaseOutcome:
+    """Run one memory case through the real evaluator and compare.
+
+    Expectations are matched against the flags the evaluator would write, not
+    against the raw findings, so the corpus exercises the whole worker path —
+    including ``review_only`` routing — rather than stopping at the rule.
+    """
+    events = case.events()
+    for event in events:
+        await store.append(event)  # type: ignore[attr-defined]
+    flags = await evaluator.evaluate(  # type: ignore[attr-defined]
+        _view_for(events)
+    )
+    produced = [
+        ExpectedFinding(
+            category=flag.category,
+            # ``claim_text`` is the offending content verbatim, which is what a
+            # corpus expectation is written against: "the write said
+            # IGNORE ALL PREVIOUS INSTRUCTIONS", not "the module explained itself".
+            claim_contains=flag.details.get("claim_text") or flag.details.get("detail", ""),
+            verdict=str(flag.details.get("verdict", "")),
+            severity=str(flag.severity),
+        )
+        for flag in flags
+    ]
+    missing: list[str] = []
+    unmatched = list(range(len(produced)))
+    for expected in case.expect:
+        index = _find_match(expected, produced, unmatched)
+        if index is None:
+            missing.append(f"{expected.category} containing {expected.claim_contains!r}")
+        else:
+            unmatched.remove(index)
+    return CaseOutcome(
+        case_id=case.case_id,
+        expected=len(case.expect),
+        produced=len(produced),
+        missing=tuple(missing),
+        spurious=tuple(produced[index].claim_contains for index in unmatched),
+    )
 
 
 def _view_for(events: Sequence[Event]) -> SessionView:
@@ -383,7 +461,27 @@ def _matches(expected: ExpectedFinding, candidate: ExpectedFinding) -> bool:
     return not expected.severity or expected.severity == candidate.severity
 
 
+#: Modules ``sentinel eval-fixtures --module`` can run: short name -> runner.
+#:
+#: The runner is a function rather than a literal module id so a report can never
+#: claim to have tested a version the module did not ship — each runner reads
+#: ``MODULE``/``MODULE_VERSION`` from the module itself.
+CORPUS_RUNNERS = {"provenance": _run_provenance_corpus, "memory": _run_memory_corpus}
+
+
+def run_module_corpus(module: str) -> CorpusReport:
+    """Run the corpus behind a module short name (``provenance``, ``memory``).
+
+    The module identity comes from the module itself rather than a literal here,
+    so a report can never claim to have tested a version the module did not ship.
+    """
+    if module not in CORPUS_RUNNERS:
+        raise KeyError(module)
+    return CORPUS_RUNNERS[module]()
+
+
 __all__ = [
+    "CORPUS_RUNNERS",
     "MAX_CLAIM_FP_RATE",
     "MAX_FALSE_NEGATIVE_RATE",
     "MAX_FALSE_POSITIVE_RATE",
@@ -391,4 +489,5 @@ __all__ = [
     "CorpusReport",
     "run_case",
     "run_corpus",
+    "run_module_corpus",
 ]

@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     fixtures.add_argument(
         "--module",
         required=True,
-        help="module short name, e.g. provenance",
+        help="module short name: provenance (S3) or memory (S4)",
     )
     _add_output_arg(fixtures)
     fixtures.set_defaults(func=_cmd_eval_fixtures)
@@ -164,16 +164,18 @@ def _cmd_replay(args: argparse.Namespace) -> int:
 
 
 def _cmd_eval_fixtures(args: argparse.Namespace) -> int:
-    """``sentinel eval-fixtures --module provenance`` (S3-T13).
+    """``sentinel eval-fixtures --module provenance|memory`` (``S3-T13``/``S4-T12``).
 
-    No store is involved: the corpus *is* the event sequence, so this runs
-    anywhere, including in CI without a database.
+    No production store is involved: the corpus *is* the event sequence, so this
+    runs anywhere, including in CI without a database. The memory runner builds
+    its own throwaway SQLite store because its evaluator goes through the real
+    worker path, but nothing durable is touched.
     """
-    from sentinel.eval.harness import CORPUS_MODULES, run_module_corpus
+    from sentinel.eval.harness import CORPUS_RUNNERS, run_module_corpus
 
-    if args.module not in CORPUS_MODULES:
+    if args.module not in CORPUS_RUNNERS:
         print(
-            f"Unknown module {args.module!r}; known modules: {', '.join(sorted(CORPUS_MODULES))}",
+            f"Unknown module {args.module!r}; known modules: {', '.join(sorted(CORPUS_RUNNERS))}",
             file=sys.stderr,
         )
         return 2

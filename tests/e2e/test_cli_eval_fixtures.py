@@ -15,6 +15,8 @@ import sys
 import pytest
 
 from sentinel._cli import main
+from sentinel.eval.fixtures.memory_corpus import MEMORY_CORPUS
+from sentinel.eval.fixtures.provenance_corpus import CORPUS
 
 pytestmark = pytest.mark.e2e
 
@@ -39,8 +41,8 @@ def test_the_matrix_counts_both_directions(
     main(["eval-fixtures", "--module", "provenance"])
 
     out = capsys.readouterr().out
-    assert "28 cases" in out
-    # 16 cases expect a flag, 12 expect silence: a detector that only ever said
+    assert f"{len(CORPUS)} cases" in out
+    # 24 cases expect a flag, 14 expect silence: a detector that only ever said
     # "clean" could not tell the two apart, so the matrix has to show both.
     assert "should flag" in out
     assert "should be quiet" in out
@@ -57,10 +59,10 @@ def test_json_output_carries_the_gates_for_ci(
     assert code == 0
     assert payload["passed"] is True
     assert payload["confusion"] == {
-        "true_positives": 16,
+        "true_positives": 24,
         "false_negatives": 0,
         "false_positives": 0,
-        "true_negatives": 12,
+        "true_negatives": 14,
     }
     assert payload["gates"]["max_false_negative_rate"] == 0.1
     assert payload["gates"]["max_false_positive_rate"] == 0.0
@@ -134,3 +136,72 @@ def test_a_fabricated_citation_is_caught_end_to_end() -> None:
     # review-only bucket so it can gate.
     assert flag.review_only is False
     assert flag.severity.value in {"high", "critical"}
+
+
+# -- the memory module (``S4-T12``)
+
+
+def test_the_memory_corpus_passes_its_gate(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``S4-T12``: the FP/FN number the sprint's exit criterion asks for."""
+    code = main(["eval-fixtures", "--module", "memory"])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "sentinel.memory_integrity@0.1.0" in out
+    assert "false-negative rate: 0.00%" in out
+    assert "false-positive rate: 0.00%" in out
+    assert out.rstrip().endswith("PASS")
+
+
+def test_the_memory_report_counts_both_directions(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["eval-fixtures", "--module", "memory"])
+
+    out = capsys.readouterr().out
+    assert f"{len(MEMORY_CORPUS)} cases" in out
+    assert "should flag" in out
+    assert "should be quiet" in out
+
+
+def test_the_memory_json_carries_the_gates_for_ci(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = main(["eval-fixtures", "--module", "memory", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["passed"] is True
+    assert payload["module"] == "sentinel.memory_integrity"
+    assert payload["confusion"]["false_positives"] == 0
+    assert payload["confusion"]["false_negatives"] == 0
+    assert payload["failures"] == []
+
+
+def test_the_two_modules_are_measured_separately(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A shared harness must not let one module's numbers stand in for another's."""
+    main(["eval-fixtures", "--module", "provenance", "--json"])
+    provenance = json.loads(capsys.readouterr().out)
+    main(["eval-fixtures", "--module", "memory", "--json"])
+    memory = json.loads(capsys.readouterr().out)
+
+    assert provenance["module"] != memory["module"]
+    assert provenance["confusion"] != memory["confusion"]
+
+
+def test_both_modules_are_listed_in_usage() -> None:
+    """The help text must not advertise a module that does not exist, or omit
+    one that does."""
+    result = subprocess.run(
+        [sys.executable, "-m", "sentinel._cli", "eval-fixtures", "--module", "nope"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "memory" in result.stderr
+    assert "provenance" in result.stderr

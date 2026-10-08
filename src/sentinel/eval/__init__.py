@@ -17,13 +17,26 @@ The pieces:
 
 * :mod:`sentinel.eval.session` — one session's events plus its call graph.
 * :mod:`sentinel.eval.worker` — triggering, idempotency, retry, checkpointing.
-* :mod:`sentinel.eval.provenance_core` — the pure grounding rules.
+* :mod:`sentinel.eval.provenance_core` — the pure grounding rules, shared.
 * :mod:`sentinel.eval.provenance` — the tool-use grounding module (``S3``).
-* :mod:`sentinel.eval.harness` — the adversarial corpus and the FP/FN gate.
+* :mod:`sentinel.eval.embeddings` — embedding providers (``S4-T1``-``T3``).
+* :mod:`sentinel.eval.memory_core` — the pure memory-integrity rules.
+* :mod:`sentinel.eval.memory` — the memory-integrity module (``S4``).
+* :mod:`sentinel.eval.harness` — the adversarial corpora and the FP/FN gate.
 """
 
 from __future__ import annotations
 
+from sentinel.eval.memory import (
+    CATEGORY_COLLAPSE,
+    CATEGORY_DRIFT,
+    CATEGORY_MEMORY_UNGROUNDED,
+    MemoryIntegrityConfig,
+    MemoryIntegrityEvaluator,
+)
+from sentinel.eval.memory import (
+    MODULE as MEMORY_MODULE,
+)
 from sentinel.eval.provenance import (
     CATEGORY_CONTRADICTED,
     CATEGORY_UNGROUNDED,
@@ -44,12 +57,18 @@ from sentinel.eval.worker import (
 )
 
 __all__ = [
+    "CATEGORY_COLLAPSE",
     "CATEGORY_CONTRADICTED",
+    "CATEGORY_DRIFT",
+    "CATEGORY_MEMORY_UNGROUNDED",
     "CATEGORY_UNGROUNDED",
+    "MEMORY_MODULE",
     "PROVENANCE_MODULE",
     "CheckpointStore",
     "EvaluatorWorker",
     "InMemoryCheckpointStore",
+    "MemoryIntegrityConfig",
+    "MemoryIntegrityEvaluator",
     "ProvenanceEvaluator",
     "ProvenanceResult",
     "SessionView",
