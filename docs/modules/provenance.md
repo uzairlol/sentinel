@@ -11,13 +11,20 @@ budget in [`SENTINEL_TDD.md`](../design/SENTINEL_TDD.md) §S3.
 
 ## What it produces
 
-Three categories, all registered in the flag taxonomy:
+Four categories, all registered in the flag taxonomy:
 
 | Category | Meaning | Severity |
 |---|---|---|
 | `contradicted_claim` | The agent cited evidence and the evidence says something else. `details["observed_value"]` holds what was actually observed. | `high` for a number, boolean or set; `medium` for a date/duration, for a comparative claim, and by default |
-| `ungrounded_claim` | The agent asserted a specific checkable fact that no tool result in the turn supports — including a count that quietly narrows a larger set. | `high` for a number, boolean or set; `medium` for a date/duration, and by default; always `high` for a cherry-picked count |
-| `unsourced_citation` | The claim names a source the session never cited. `details["claimed_source"]` holds what it named. | Same as the underlying ungrounded verdict — `medium` for a numeric claim here, `high` for a monetary one |
+| `ungrounded_claim` | The agent asserted a specific checkable fact that no tool result in the turn supports — including a count that quietly narrows a larger set, and a universal pass claim no enumeration supports. | `high` for a number, boolean or set; `medium` for a date/duration, and by default; always `high` for a cherry-picked count |
+| `unsourced_citation` | The claim names a source and the turn cited **nothing at all**. `details["claimed_source"]` holds what it named. | Same as the underlying ungrounded verdict — `medium` for a numeric claim here, `high` for a monetary one |
+| `misattributed_citation` | The claim names source A and the turn cited source **B**. `details["claimed_source"]` holds what it named and the detail names what it cited instead. | `medium` floor — the citation is resolved and wrong whatever the value's kind — raised by the safety floor where the subject warrants it |
+
+The last two are both about the *citation* rather than the value, and they are
+separate categories because the remedy differs. `unsourced_citation` means "this
+document was never opened"; `misattributed_citation` means "a document was
+opened and this is not it". A reviewer who collapses them loses the one piece of
+information that tells them whether to go looking.
 
 A wrong price is worse than a wrong date, so severity follows the claim's kind,
 not merely whether it is a finding: a contradicted number outranks a contradicted
@@ -37,11 +44,11 @@ up in `details["support_kind"]`.
 `sentinel eval-fixtures --module provenance`:
 
 ```
-corpus: 28 cases  module=sentinel.tool_grounding@0.2.0
+corpus: 38 cases  module=sentinel.tool_grounding@0.3.0
 confusion matrix (case level)
                 flagged  silent
-  should flag       16       0   <- recall 100.00%
-  should be quiet     0      12   <- precision 100.00%
+  should flag       24       0   <- recall 100.00%
+  should be quiet     0      14   <- precision 100.00%
 
   false-negative rate: 0.00% (gate <= 10%)
   false-positive rate: 0.00% (gate <= 0%)
@@ -51,27 +58,34 @@ PASS
 
 | Metric | Gate | Measured |
 |---|---|---|
-| Case false-negative rate | ≤ 10% | **0.00%** (0/16) |
-| Case false-positive rate | ≤ 0% | **0.00%** (0/12) |
-| Claim false-positive rate | ≤ 5% | **0.00%** (0/28) |
+| Case false-negative rate | ≤ 10% | **0.00%** (0/24) |
+| Case false-positive rate | ≤ 0% | **0.00%** (0/14) |
+| Claim false-positive rate | ≤ 5% | **0.00%** (0/38) |
 
-The corpus is 28 replayable event sequences in
-`src/sentinel/eval/fixtures/provenance_corpus.py`: 12 known-good, 8 known-bad by
-contradiction, 6 known-bad by silence, 2 known-bad by fabricated citation. The
+The corpus is 38 replayable event sequences in
+`src/sentinel/eval/fixtures/provenance_corpus.py`: 14 known-good, 8 known-bad by
+contradiction, 6 known-bad by silence, 2 by fabricated citation, 2 by
+misattributed citation, and 2 by cherry-picking a universal pass claim. The
 FP rate is gated at **0%** rather than
 the plan's suggested 5%, deliberately: a rule-based module that cries wolf gets
 muted within a week, and a muted module provides no safety at all. The review
 queue exists to absorb what the rules cannot decide, which means the rules are
 held to a higher bar than the queue.
 
-Four of the known-good cases exist specifically to attack the new rules rather
-than to add volume: an honest denominator (`4 of 4 checks passed`), a count shape
-with no enumerable set (`12 of 20 seats used`), an attributed claim that *does*
-cite its source, and a mixed turn with one good and one bad claim. Each of them
-fails loudly if its rule is loosened into "a count was stated" or "a source was
-named".
+Seven of the known-good cases exist specifically to attack the rules rather than
+to add volume, and each fails loudly if its rule is loosened:
 
-Read these numbers as what they are: 28 hand-built sessions written by the same
+| Case | The rule it pins down |
+|---|---|
+| `grounded_count_reported_whole` | An honest denominator (`4 of 4`), so the cherry-pick rule cannot become "a count was stated" |
+| `grounded_count_verbatim` | A count shape with no enumerable set (`12 of 20 seats`) |
+| `grounded_attributed_and_cited` | Attribution *and* a real citation, so "a source was named" cannot become a flag |
+| `grounded_named_source_is_the_cited_one` | The named phrase resolves to the very result that was cited |
+| `grounded_generic_source_name_is_not_misattributed` | "the report" identifies nothing and must not be resolved by guessing |
+| `grounded_ambiguous_source_name_is_not_misattributed` | Two results match the name, so "the source" is not identified |
+| `grounded_universal_prose_status_words` | Prose containing "no", "done", "missing" must not read as item statuses |
+
+Read these numbers as what they are: 38 hand-built sessions written by the same
 person who wrote the rules. They bound the obvious failure modes and they prove
 the harness measures honestly. They are not a claim about an agent in the wild.
 [`Limitations`](#limitations) says what would be needed to claim that.
@@ -100,23 +114,46 @@ structural rather than resolved — see [Limitations](#limitations).
 | `duration` | "the migration takes 30 seconds" | yes |
 | `numeric` | "the pro plan is $29 per month" | yes |
 | `ratio` | "2 of 3 checks passed" | yes |
+| `universal` | "all checks passed" | yes |
 | `boolean` | "cancellations are accepted at any time" | yes |
 | `comparative` | "today is the biggest sale day" | only with a ranking in evidence |
 | `entity` | "the endpoint is api.example.com" | no |
 | `vague` | "according to the document, it is fine" | only if the lexicon resolves it |
+
+`universal` is kept apart from `boolean` deliberately. Both assert a
+proposition, but the evidence that settles "every job succeeded" is an
+*enumeration with per-item statuses*, not a single stated proposition — which is
+what makes cherry-picking checkable there and not in a boolean diff. The
+quantifier has to be explicit: "checks passed" says how many passed without
+saying how many there were, and treating it as universal would flag it against
+any enumeration containing a failure.
 
 Note that this is a **value-shape** taxonomy, not the `grounded_claim` /
 `numeric_claim` / `ungrounded` span classification `S3-T5` specified. Whether a
 claim is grounded is decided later, by the diff — a design that keeps extraction
 and adjudication separate, but not the one the plan described.
 
-Extraction reads `llm.response` **and** a reasoning trace when one is present.
-`reasoning_text_of` accepts `reasoning`, `reasoning_content`, `thinking` and
-`thought`, at the payload top level or one level down inside a `message`, and the
-answer and the trace are joined by a blank line before splitting so a truncated
-trace cannot glue itself onto the answer and produce a claim quoting text from
-neither. No instrumenter records those keys today, so this is a live seam with
-no traffic: closing it is an `S1` capture change, not a module change.
+Extraction reads `llm.response` **and** a reasoning trace when one is present,
+and the trace is now captured rather than hypothetical. Every instrumentor that
+sees a provider body lifts the trace out and writes it under an explicit
+`reasoning` key — LangChain from the message's `additional_kwargs` or a direct
+field, the OpenAI-compatible transport from `choices[i].message`, raw Ollama from
+`message.thinking` — capped at `MAX_CAPTURED_TEXT`. `reasoning_text_of` reads
+those keys first and still walks nested provider bodies, so it works on logs
+written by an older instrumentor or by a framework Sentinel does not wrap.
+
+Lifting the trace out rather than leaving it in the raw body is what makes it
+*reachable*: `reasoning_content` sits two levels down a list in an OpenAI-shaped
+response, so a generic key lookup cannot find it. Capturing it without naming it
+would have been the same as not capturing it.
+
+A figure the model states while thinking and then revises away is a claim, and a
+reader never sees it — so it gets the same check against the same evidence as a
+figure in the answer. `S5` builds on exactly this seam.
+
+The answer and the trace are joined by a blank line before splitting, so a
+truncated trace cannot glue itself onto the answer and produce a claim quoting
+text from neither.
 
 Implicit grounding is **data, not code**, and it comes in two flavours because
 the two resolve against different things:
@@ -160,6 +197,14 @@ For each response, evidence is collected through three routes:
   `parent` refs and the call graph.
 - **`implied`** — lexicon phrases the evidence happens to resolve.
 
+and, alongside the text, **`sources`** carries each result's identity — its
+`event_id`, the tool that produced it, and whether *this* response cited it. The
+flattened text answers "does the evidence support this value"; only the identity
+answers "which document is the one this claim says it read". When two results ran
+and the response cited one of them, that question has two different answers
+depending on which one the claim points at, and a rule that cannot tell them
+apart is a rule that misses misattribution.
+
 The asymmetry is the whole false-positive story. A claim was either grounded or
 it was not, *regardless of whether the author bothered to cite*. Requiring a
 citation would make "available but uncited" evidence read as ungrounded, and the
@@ -181,26 +226,62 @@ For one claim against one evidence set:
    value outside a stated bound, a weekday or date mismatch, a negation flip, a
    set the evidence does not offer, explicit exclusion phrasing.
 5. **Otherwise** → `UNKNOWN`, which is ungrounded if the claim is specific.
-6. **Cherry-picked count** → `UNKNOWN` with `support_kind=cherry_pick`: the claim
-   states a fraction of a set, and the cited output shows more items in it than
-   the claimed denominator ("2 of 3 passed" against four checks run). The
+6. **Cherry-picked count** → `CONFLICTED` with `support_kind=cherry_pick`: the
+   claim states a fraction of a set, and the cited output shows more items in it
+   than the claimed denominator ("2 of 3 passed" against four checks run). The
    denominator is cross-checked against what the evidence can *enumerate*, which
    is why `12 of 20 seats` and `4 of 4 checks passed` are silent and only a
    narrowed denominator speaks.
-7. **Unsourced citation** → `UNSOURCED`: the claim names a source
-   (`Claim.source_attributed`) and the response cited no tool result at all.
-   Ordered last on purpose. It can only reclassify a claim that was already
-   headed for a flag, so it can never turn silence into a new one — and it is
-   additionally gated on `DiffContext.citations_recorded`, which the evaluator
-   derives from a prior turn. Without that precondition, "cites nothing" is
-   indistinguishable from a framework that never emits citations, and the rule
-   would flag every agent using one.
+7. **Cherry-picked universal** → `CONFLICTED` with `support_kind=cherry_pick`:
+   "all checks passed" states no denominator at all, so rule 6 has no number to
+   work with and the favourable subset has simply been declared to be the whole.
+   What refutes it is the per-item *statuses*: a source reporting `skipped`,
+   `failed` or `pending` for any item has already told the reader that not every
+   item passed. A skipped check is the sharpest case, because in a summary line
+   it is indistinguishable from a passing one — which is exactly how the sentence
+   gets written. The rule also runs the other way: an enumeration where every
+   item passed *supports* the claim, so "all passed" is not a phrase that always
+   produces a flag.
+8. **Citation mismatch** → `UNSOURCED` or `MISATTRIBUTED`, in two steps:
+   - the claim names a source (`Claim.source_attributed`) and the session must
+     prove citations are recorded at all (`DiffContext.citations_recorded`, from
+     a prior turn). Without that precondition "cites nothing" is
+     indistinguishable from a framework that never emits citations;
+   - if the turn cited **nothing**, the verdict is `UNSOURCED`. If the turn cited
+     **something else**, `resolve_source` matches the named phrase against the
+     results that ran — tool name and output text — and a name that resolves to
+     an uncited result, or to nothing, is `MISATTRIBUTED`.
+
+   Both verdicts are ordered last on purpose: every rule that can find support
+   has already run, so a citation mismatch can only reclassify a claim that was
+   already headed for a flag. It can never turn silence into a new one.
+
+`resolve_source` is deliberately reluctant. It matches only on *distinctive*
+words — determiners, function words and generic document words ("report",
+"document", "api", "record") are discarded, so a phrase built only from them
+cannot resolve at all and no flag is raised. Several matching results is
+`AMBIGUOUS` and equally silent. Only a single unambiguous match can become a
+finding, and the asymmetry is the design: a fabricated citation that slips
+through costs one flag, a false one costs an operator's trust in every flag this
+module will ever raise.
+
+Reading "Q3" as two characters long is the point of that rule. A length cut-off
+on tokens would discard exactly the words that identify a source — `q3` tells
+one quarter's report from another's — and would leave "the Q3 compliance report"
+matching *both* quarters, which is indistinguishable and so declines to flag the
+case the rule exists for.
 
 The contradiction rules are guarded, because the tempting implementation flags
 every unrelated number in the log. A numeric contradiction requires a shared
 non-generic term, comparable units, comparable magnitude (a "5 ms" claim is not
 refuted by "500 seats"), a ratio under 2×, and no limit phrasing. Bound and
 rounding are handled before comparison so "up to 3" is not a disagreement with 2.
+
+Item statuses are read in two shapes — `check_3 skipped` and `job_2: failed` —
+and the second requires an explicit separator. Without that requirement, ordinary
+prose containing "no", "done" or "missing" would read as an enumeration, and the
+enumeration floor would be the only thing standing between English and a
+cherry-picking finding.
 
 ### 4. Severity and confidence
 
@@ -386,47 +467,49 @@ speaks.
 Stated plainly, because a safety tool that overstates itself is worse than one
 that does not ship:
 
-- **Source resolution is per-response, not per-claim.** A claim that names a
-  source while the response cites nothing is caught. A claim that names source
-  A while citing source B — where both tool calls genuinely ran — is not yet
-  distinguished, because nothing matches the named noun phrase to a specific tool
-  result. `Claim.source_attributed` records *what the claim said*, not *which
-  call it refers to*. There is no `provenance_diff` symbol either: the shipped
-  seam is `gather_evidence` plus `diff_claim`.
-- **The unsourced rule is deliberately narrow for a reason.** It fires only when
-  the response cites nothing, so a turn that cites correctly in one sentence and
-  fabricates in another is missed until per-claim resolution lands. It runs last
-  in the diff precisely so that narrowness cannot become a false-positive source.
-- **Cherry-picking is detected structurally, not semantically.** The rule
-  compares a claimed denominator against the number of items the cited output
-  can enumerate. "2 of 3 passed" is caught; "all checks passed" when one was
-  skipped, or a favourable aggregate drawn from an unfavourable table, is not.
+- **Source resolution matches on words, not on meaning.** `resolve_source` decides
+  that "the compliance report" means the `compliance.report` call because the
+  distinctive words overlap. It cannot decide that "the vendor's response" means
+  a call named `escalation_handler`, and a named source with no distinctive word
+  ("the report") is not resolved at all. So misattribution is caught when the
+  naming is literal and missed when it is a paraphrase. The rule declines rather
+  than guesses, which is the right trade for a zero-FP gate, but it is a trade:
+  the cost is recall on paraphrased citations.
+- **Cherry-picking is still detected structurally, not semantically.** A narrowed
+  denominator and a universal "all passed" over an enumerated set are both caught.
+  A favourable aggregate drawn from an unfavourable table ("overall health is good"
+  when the table is mostly warnings) is not, because that needs a notion of what a
+  result was *for*, which is a modelling question rather than a rule.
 - **Rule-based extraction.** It reads surface patterns, not meaning. A claim
   phrased in a way no rule anticipates is invisible to it. This is the main
   source of false negatives, and the reason the gate has a 10% FN ceiling rather
   than zero.
 - **Turn-scoped evidence.** A claim grounded in something the agent read three
   turns ago reads as ungrounded. A memory-integrity module (`S4`) is the
-  intended fix; until then, long-horizon claims will queue.
-- **No reasoning trace is ever captured.** `reasoning_text_of` reads
-  `reasoning` / `reasoning_content` / `thinking` / `thought` and the diff checks
-  claims found there, but no instrumenter writes any of those keys, so the seam
-  is exercised only by hand-built payloads. A claim the model committed to in
-  its reasoning and hedged in its reply is still unexamined. This is an `S1`
-  capture gap; the module side is done.
+  intended fix.
+- **Reasoning traces are captured, but only where the provider returns them.**
+  LangChain, the OpenAI-compatible transport and raw Ollama all lift a trace out
+  of the provider body and write it under `reasoning`, capped. A provider that
+  does not return a trace still yields none, and the **streaming** paths capture a
+  raw transcript rather than parsed structure — a trace streamed as deltas is
+  inside the transcript but not lifted, so streaming agents get answer-level
+  checking only. Parsing streamed deltas is a capture change for the streaming
+  instrumentors.
 - **Grounding language is a closed list.** Both lexicons are enumerated and
   tested, so an attribution phrasing nobody thought of ("the report suggests",
   "based on the vendor's reply") is not recognised as naming a source, and
-  `SAFETY_LEXICON` escalation is lexical — "deadline" escalates, "termination"
-  does not.
+  `SAFETY_LEXICON` escalation is lexical — "the deadline is 30 April" escalates on
+  "deadline" and "the meeting is 30 April" does not. That is a defensible floor,
+  not a risk model.
 - **Subject matching is lexical.** Contradiction detection needs a shared
   non-generic term, so a claim about "it" and evidence about "the pro plan" with
   no shared noun is silence rather than conflict. Conservative on purpose: a
   missed contradiction is recoverable, a false one costs the operator's trust.
-- **The corpus is 28 sessions, self-authored.** It is a regression suite and a
+- **The corpus is 38 sessions, self-authored.** It is a regression suite and a
   gate, not an evaluation of the module against real traffic. Sizing the true
   rate needs a labelled sample of production sessions (`S13`), and until that
-  exists the honest claim is "0% on 28 hand-built cases".
+  exists the honest claim is "0% on 38 hand-built cases" — a smoke test that says
+  the rules do not fire on the failures someone thought of.
 - **A zero FP rate is a design constraint, not an achievement.** The
   `is_actionable` policy is deliberately narrow. Recall is expected to be the
   weaker number on real traffic.
@@ -434,20 +517,18 @@ that does not ship:
   a lexical subject lexicon, not a model of what an operator should be paged
   for. It is a starting taxonomy, and the floors can be tuned per deployment
   without touching the rules.
-- **`provenance_core` has no consumer.** It is written as the shared mechanism
-  `S4` will import, and is guarded against depending back on `sentinel.instrument`
-  — but `S4` does not exist yet, so today the only caller is `S3` itself.
 
 ## Where the code lives
 
 | Piece | Path |
 |---|---|
-| Claims, values, lexicon, diff, severity | `src/sentinel/eval/provenance_core.py` |
+| Claims, values, lexicon, diff, source resolution, severity | `src/sentinel/eval/provenance_core.py` |
 | Worker, evidence gathering, flag construction | `src/sentinel/eval/provenance.py` |
-| Bounded session view | `src/sentinel/eval/session.py` |
+| Bounded session view, reasoning-trace reading | `src/sentinel/eval/session.py` |
 | Worker framework, checkpoints, retries | `src/sentinel/eval/worker.py` |
-| Corpus (28 cases) | `src/sentinel/eval/fixtures/provenance_corpus.py` |
+| Corpus (38 cases) | `src/sentinel/eval/fixtures/provenance_corpus.py` |
 | Harness, confusion matrix, gate constants | `src/sentinel/eval/harness.py` |
+| Reasoning-trace capture | `src/sentinel/instrument/{langchain,openai_compat,ollama}.py` |
 | Flag schema | `src/sentinel/models/flags.py`, [`docs/adr/0012`](../adr/0012-flag-schema.md), [`docs/flag-schema.md`](../flag-schema.md) |
 
 ```python

@@ -51,9 +51,34 @@ class TestCorpusShape:
         categories = {expected.category for case in CORPUS for expected in case.expect}
         assert categories == {
             "contradicted_claim",
+            "misattributed_citation",
             "ungrounded_claim",
             "unsourced_citation",
         }
+
+    def test_the_misattribution_rule_has_its_own_guards(self) -> None:
+        """A new rule needs known-good cases that exist only to catch its FPs.
+
+        Two of these expect a finding — an *ungrounded* claim, which is the
+        honest reading of the turn — so "expects a flag" is not the property
+        that makes them guards. What makes them guards is that none of them
+        licenses `misattributed_citation`. Listed by id because the cases are
+        chosen for what they make the resolver do (a generic name, an ambiguous
+        name, a name matching the cited result), which is not inferable from the
+        case itself.
+        """
+        guard_ids = {
+            "grounded_named_source_is_the_cited_one",
+            "grounded_generic_source_name_is_not_misattributed",
+            "grounded_ambiguous_source_name_is_not_misattributed",
+        }
+        guards = [case for case in CORPUS if case.case_id in guard_ids]
+
+        assert len(guards) == len(guard_ids)
+        for case in guards:
+            assert "misattributed_citation" not in {
+                expected.category for expected in case.expect
+            }, case.case_id
 
     @pytest.mark.parametrize("case", CORPUS, ids=lambda case: case.case_id)
     def test_a_case_is_a_valid_linked_session(self, case: CorpusCase) -> None:
@@ -88,8 +113,17 @@ class TestCorpusShape:
 
     def test_the_uncited_variant_has_no_grounding_ref(self) -> None:
         case = case_by_id("grounded_explicit_price")
-        response = next(event for event in case.events() if event.type == "llm.response")
+        response = next(event for event in case.uncited_events() if event.type == "llm.response")
         assert not any(ref.kind.value == "grounds" for ref in response.refs)
+
+    def test_a_second_tool_cites_only_the_result_it_names(self) -> None:
+        """Two results, one citation: the asymmetry the misattribution rule reads."""
+        case = case_by_id("misattributed_citation_named_uncited")
+        response = next(event for event in case.events() if event.type == "llm.response")
+        results = [ref for ref in response.refs if ref.kind.value == "grounds"]
+
+        assert len(case.all_tools) == 2
+        assert len(results) == 1
 
 
 class TestGate:

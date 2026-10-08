@@ -56,8 +56,14 @@ class ClaimKind(StrEnum):
     COMPARATIVE = "comparative"
     #: A count over a named set ("2 of 3 checks passed"). The denominator is the
     #: part that carries the finding: a count smaller than what the source
-    #: enumerates is how cherry-picking announces itself.
+    # enumerates is how cherry-picking announces itself.
     RATIO = "ratio"
+    #: A claim that *every* member of a set has a property ("all checks passed",
+    #: "every test succeeded"). Kept apart from :attr:`BOOLEAN` because the
+    #: evidence that settles it is an enumeration with per-item statuses, not a
+    #: single stated proposition — which is what makes cherry-picking checkable
+    #: here but not in a boolean diff.
+    UNIVERSAL = "universal"
     VAGUE = "vague"
 
 
@@ -73,6 +79,9 @@ class ValueKind(StrEnum):
     TEXT = "text"
     #: ``number``/``denominator``: a counted subset of a counted whole.
     RATIO = "ratio"
+    #: Every member of a named set has a property. ``canonical`` holds the
+    #: quantified noun and :attr:`Value.text` the property asserted of it.
+    UNIVERSAL = "universal"
 
 
 #: Kinds a claim must land in to be checkable against evidence. Anything else is
@@ -88,6 +97,7 @@ CHECKABLE_KINDS = frozenset(
         ClaimKind.ENTITY,
         ClaimKind.COMPARATIVE,
         ClaimKind.RATIO,
+        ClaimKind.UNIVERSAL,
     }
 )
 
@@ -210,9 +220,22 @@ _NON_ASSERTIONS = (
     "note:",
     "warning:",
     "in summary",
-    "summary:",
     "step 1",
     "step 2",
+)
+
+#: A label introducing what follows: "Summary:", "Recap -", "Key points:".
+#:
+#: Stripped before :func:`is_assertion` decides, rather than counted as a
+#: non-assertion. A label is metadata *about* the text, not a claim *in* it, and
+#: treating it as a veto silently disabled claim extraction for an entire class of
+#: text — every reflective memory write, which is exactly what the memory-integrity
+#: module (``S4``) exists to check. "Summary: the incident was resolved on
+#: 2024-06-01" asserts a date; the label should not hide it.
+_LABEL_PREFIX_RE = re.compile(
+    r"^\s*(?:summary|recap|overview|highlights?|key\s+points?|key\s+takeaways|"
+    r"tl;?dr|note|notes|warning|observations?|findings?)\s*[:\-]\s*",
+    re.IGNORECASE,
 )
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
@@ -665,6 +688,205 @@ def _is_source_phrase(source: str) -> bool:
     return bool(words) and words[0] not in _NON_SOURCE_HEADS
 
 
+# ---------------------------------------------------------------------------
+# source resolution: which result a named source points at
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Source:
+    """One tool result a response could answer from, carrying its identity.
+
+    The text-only evidence in :class:`DiffContext` answers "does the evidence
+    support this value?". It cannot answer the question a fabricated citation
+    actually turns on: *which* result is the one the claim claims to have read.
+    When two results ran and the response cited one of them, "the named source
+    was consulted" has two different answers depending on which one the claim
+    points at, and only the identity of each result can tell them apart. So the
+    ``event_id`` and the tool name travel with the text.
+
+    ``cited`` records that *this response* cited the result, not merely that
+    the session cites results somewhere. That distinction is what makes the
+    fabricated-citation rule per-claim rather than per-turn.
+    """
+
+    event_id: str
+    tool: str
+    text: str
+    cited: bool
+
+    @property
+    def label(self) -> str:
+        """A short human name, for flag details and message text."""
+        return self.tool or self.event_id
+
+
+class SourceMatch(StrEnum):
+    """What resolving a named source against the log found."""
+
+    #: Exactly one result matches the named source, and the response cited it.
+    CITED = "cited"
+    #: Exactly one result matches, and the response did **not** cite it — the
+    #: right thing ran and the agent pointed somewhere else.
+    UNCITED = "uncited"
+    #: Nothing that ran resembles the named source at all.
+    ABSENT = "absent"
+    #: Several results match, so "the source" is not identified. Never a flag.
+    AMBIGUOUS = "ambiguous"
+    #: The named phrase has no distinctive word to match on, or the context
+    #: carries no source identities at all. Never a flag.
+    UNRESOLVED = "unresolved"
+
+
+#: Words that name the *kind* of document rather than identifying one. Almost
+#: every source is called "the report" or "the API", so matching on them would
+#: make every claim resolve to every result — the exact opposite of a rule meant
+#: to tell two results apart. They are ignored for matching, which means a
+#: phrase built only from them cannot resolve at all.
+_GENERIC_SOURCE_WORDS = frozenset(
+    {
+        "api",
+        "article",
+        "catalog",
+        "catalogue",
+        "data",
+        "database",
+        "doc",
+        "document",
+        "documentary",
+        "documents",
+        "entry",
+        "file",
+        "index",
+        "list",
+        "log",
+        "logs",
+        "memo",
+        "message",
+        "metadata",
+        "output",
+        "page",
+        "paper",
+        "record",
+        "records",
+        "reference",
+        "report",
+        "reports",
+        "response",
+        "result",
+        "results",
+        "row",
+        "rows",
+        "source",
+        "statement",
+        "table",
+        "value",
+        "values",
+    }
+)
+
+#: Split ``fetchComplianceReport`` before lowercasing, so the tool's own name is
+#: tokenised the way a human reads it.
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+_NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]+")
+
+
+def _tokens(text: str) -> frozenset[str]:
+    """The lowercased word tokens of *text*, split on punctuation and case."""
+    spaced = _CAMEL_BOUNDARY_RE.sub(" ", text)
+    return frozenset(token for token in _NON_ALNUM_RE.split(spaced.lower()) if token)
+
+
+#: Short function words that cannot identify a source. An explicit list rather
+#: than a length cut-off, because the tokens that best identify a source are
+#: often short: "q3" tells one quarter's report from another's and "eu" tells
+#: one region's from another's. Dropping anything under three characters would
+#: discard exactly the words that make a source identifiable, and would turn
+#: "the Q3 compliance report" into a name that matches *both* quarters — which
+#: is indistinguishable, and so declines to flag the case it exists for.
+_SOURCE_FUNCTION_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "of",
+        "on",
+        "or",
+        "per",
+        "that",
+        "to",
+        "was",
+        "were",
+        "with",
+    }
+)
+
+
+def _distinctive_words(phrase: str) -> frozenset[str]:
+    """The words in *phrase* that could identify a source.
+
+    Determiners, :data:`_SOURCE_FUNCTION_WORDS` and
+    :data:`_GENERIC_SOURCE_WORDS` are dropped. What survives is what
+    distinguishes "the Q3 compliance report" from "the weather feed" — and if
+    nothing survives, the phrase cannot identify a source, which the caller
+    reads as :attr:`SourceMatch.UNRESOLVED` rather than guessing.
+    """
+    return _tokens(phrase) - _DETERMINERS - _GENERIC_SOURCE_WORDS - _SOURCE_FUNCTION_WORDS
+
+
+def _mentions(words: frozenset[str], haystack: frozenset[str]) -> bool:
+    """Whether every word in *words* appears in *haystack*.
+
+    Plural-tolerant on the surface rather than by folding the word itself: a
+    rule that rewrote "reports" to "report" would also rewrite "acmes" to
+    "acme" and "status" to "statu", and a mangled word silently stops matching —
+    which on the absence path would manufacture a false "that source never
+    ran" finding.
+    """
+    return all(word in haystack or f"{word}s" in haystack for word in words)
+
+
+def resolve_source(named: str, sources: Iterable[Source]) -> tuple[SourceMatch, tuple[Source, ...]]:
+    """Match the source *named* by a claim against the results that ran.
+
+    Returns the match and every source it matched. Deliberately conservative:
+    anything short of one unambiguous match comes back
+    :attr:`SourceMatch.AMBIGUOUS` or :attr:`SourceMatch.UNRESOLVED`, and neither
+    can ever become a flag. The asymmetry is the design — a fabricated citation
+    that slips through costs one flag, a false one costs an operator's trust in
+    every flag this module will ever raise.
+
+    A source's identity is its tool name *and* its output text. The tool name
+    carries "compliance_report"; the text carries "Acme". Either alone can name
+    the same thing, and which one is populated depends on the framework.
+    """
+    available = tuple(sources)
+    words = _distinctive_words(named)
+    if not available or not words:
+        return SourceMatch.UNRESOLVED, ()
+    matched = tuple(
+        source
+        for source in available
+        if _mentions(words, _tokens(source.tool) | _tokens(source.text))
+    )
+    if not matched:
+        return SourceMatch.ABSENT, ()
+    if len(matched) > 1:
+        return SourceMatch.AMBIGUOUS, matched
+    return (SourceMatch.CITED if matched[0].cited else SourceMatch.UNCITED), matched
+
+
 #: A counted subset of a counted whole, with the noun that makes it one:
 #: "2 of 3 checks", "4/12 findings", "2 out of 5 samples".
 _RATIO_RE = re.compile(
@@ -716,6 +938,131 @@ def _enumerated_count(text: str) -> int:
     if len(labels) >= _MIN_ENUMERATED_SIBLINGS:
         best = max(best, len(labels))
     return best
+
+
+# -- universal claims: "all checks passed" (``S3-T12``)
+#
+# The counted-denominator rule catches "2 of 3 passed". It cannot catch "all
+# checks passed", because a universal claim states no denominator at all — the
+# favourable subset has simply been declared to be the whole. The evidence that
+# settles it is the *per-item statuses* of an enumeration, so this needs the
+# enumeration read a second way: not how many items there are, but how each one
+# came out.
+
+
+#: Verbs that assert a set member *succeeded*. The property being asserted is
+#: the one an item's status is compared against.
+_PASS_VERBS: tuple[str, ...] = (
+    "passed",
+    "pass",
+    "succeeded",
+    "succeeds",
+    "succeed",
+    "passed cleanly",
+    # An agent says "all green", not "all passed".
+    "green",
+    "clean",
+    "ok",
+)
+_SUCCESS_STATES = frozenset(
+    {
+        "pass",
+        "passed",
+        "passing",
+        "ok",
+        "okay",
+        "success",
+        "successful",
+        "succeeded",
+        "green",
+        "clean",
+        "true",
+        "yes",
+        "done",
+        "complete",
+        "completed",
+    }
+)
+#: Statuses that make a universal pass claim wrong. ``skipped`` is the one that
+#: matters most: a skipped check is indistinguishable from a passing one in a
+#: summary line, which is precisely how "all checks passed" gets written over a
+#: run where something was never executed.
+_NON_PASS_STATES = frozenset(
+    {
+        "fail",
+        "failed",
+        "failing",
+        "failure",
+        "error",
+        "errored",
+        "timeout",
+        "timed out",
+        "skipped",
+        "skip",
+        "pending",
+        "blocked",
+        "incomplete",
+        "partial",
+        "warn",
+        "warning",
+        "flaky",
+        "broken",
+        "cancelled",
+        "canceled",
+        "aborted",
+        "missing",
+        "absent",
+        "false",
+        "no",
+    }
+)
+
+#: ``(quantifier, [modifier], noun, verb)`` — "all checks passed", "every test
+#: succeeded", "all smoke tests passed". The modifier slot is what lets the
+#: quantifier reach a compound noun without the noun list having to enumerate
+#: every prefix a deployment might use. A bare noun with no quantifier is
+#: excluded: "checks passed" is a statement about an unspecified number of
+#: checks, which is not the universal claim.
+_UNIVERSAL_RE = re.compile(
+    r"\b(?P<quant>all|every|each)\s+(?:\d+\s+)?(?:[\w\-]+\s+)?"
+    r"(?P<noun>checks?|tests?|cases?|scans?|jobs?|scenarios?|examples?|samples?|"
+    r"specs?|specifications?|probes?|validations?|verifications?|tasks?|stages?|"
+    r"steps?|rows?|items?|entries?|regions?|clusters?|nodes?|models?|rules?)\s+"
+    # The copula slot: agents write "each job is green" as readily as "all jobs
+    # succeeded", and without it the boolean rule claims the sentence and the
+    # universal rule never sees it.
+    r"(?:(?:is|are|was|were)\s+)?"
+    r"(?P<verb>" + "|".join(_PASS_VERBS) + r")\b",
+    re.IGNORECASE,
+)
+
+#: The status vocabulary as one alternation, for the patterns below.
+_STATUS_ALTERNATION = "|".join(sorted(_NON_PASS_STATES | _SUCCESS_STATES))
+
+#: ``check_3: skipped`` / ``test2=fail`` — an item and its status joined by an
+#: explicit separator. Safe to match loosely on the subject, because the
+#: separator is what says "this is a field, not a sentence".
+_ITEM_STATUS_JOINED_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<item>[A-Za-z][\w.\-]*[_-]\d{1,4}|[A-Za-z][\w.\-]{1,30})"
+    r"\s*[:=]\s*(?P<status>" + _STATUS_ALTERNATION + r")\b",
+    re.IGNORECASE,
+)
+
+#: ``check_3 skipped`` — no separator, so the item must be identifier-shaped
+#: (``stem_1``). Without that restriction this would read any prose containing
+#: "no" or "done" as an item status, and prose is full of both; the
+#: ``_MIN_ENUMERATED_SIBLINGS`` floor would then be the only thing standing
+#: between ordinary English and a cherry-picking finding.
+_ITEM_STATUS_ADJACENT_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<item>[A-Za-z][\w.\-]*[_-]\d{1,4})\s+"
+    r"(?P<status>" + _STATUS_ALTERNATION + r")\b",
+    re.IGNORECASE,
+)
+
+_ITEM_STATUS_RES: tuple[re.Pattern[str], ...] = (
+    _ITEM_STATUS_JOINED_RE,
+    _ITEM_STATUS_ADJACENT_RE,
+)
 
 
 def _raw_numbers(text: str) -> set[Decimal]:
@@ -831,10 +1178,17 @@ def is_assertion(fragment: str) -> bool:
 
     Questions and conversational filler are dropped: they cannot be grounded,
     so flagging them would only inflate the false-positive rate.
+
+    A leading label ("Summary:", "Recap -") is stripped first. It describes the
+    text rather than the world, so the question is whether what *follows* the
+    label asserts anything — see :data:`_LABEL_PREFIX_RE` for why this is not
+    the same rule as "in summary", which is an inline phrase inside a sentence
+    rather than a header.
     """
-    lowered = normalize_text(fragment)
-    if not lowered or "?" in fragment:
+    if not normalize_text(fragment) or "?" in fragment:
         return False
+    body = _LABEL_PREFIX_RE.sub("", fragment).strip() or fragment
+    lowered = normalize_text(body)
     if len(lowered) < 12:
         return False
     return not any(lowered.startswith(phrase) for phrase in _NON_ASSERTIONS)
@@ -908,6 +1262,12 @@ class RuleBasedClaimExtractor:
         ratio = self._match_ratio(fragment)
         if ratio is not None:
             return self._claim(claim_id, fragment, ClaimKind.RATIO, ratio, "ratio", index)
+
+        universal = self._match_universal(fragment)
+        if universal is not None:
+            return self._claim(
+                claim_id, fragment, ClaimKind.UNIVERSAL, universal, "universal", index
+            )
 
         if implicit:
             phrase, kind = self._lexicon.reference(fragment) or ("", ValueKind.TEXT)
@@ -992,6 +1352,25 @@ class RuleBasedClaimExtractor:
             index=index,
             terms=_terms(fragment),
             source_attributed=self._lexicon.attribution(fragment),
+        )
+
+    def _match_universal(self, fragment: str) -> Value | None:
+        """A claim that every member of a set succeeded: "all checks passed".
+
+        The trailing noun and verb are both required, and the quantifier must be
+        explicit. "checks passed" says how many passed without saying how many
+        there were, which is a different (and much vaguer) statement; treating
+        it as the universal claim would flag it on any enumeration with a failure
+        in it, which is not what the sentence means.
+        """
+        match = _UNIVERSAL_RE.search(fragment)
+        if match is None:
+            return None
+        noun = normalize_text(match.group("noun")).removesuffix("s") or "item"
+        return Value(
+            kind=ValueKind.UNIVERSAL,
+            canonical=noun,
+            raw=match.group(0),
         )
 
     def _match_ratio(self, fragment: str) -> Value | None:
@@ -1382,6 +1761,10 @@ class Verdict(StrEnum):
     #: Narrower than :attr:`UNKNOWN`, and only reachable when the session
     #: actually records citations (see :attr:`DiffContext.citations_recorded`).
     UNSOURCED = "unsourced"
+    #: The claim names one source and cites another. Finer than
+    #: :attr:`UNSOURCED`: something *was* cited this turn, just not the thing
+    #: the claim says it read, and the reviewer needs to know which.
+    MISATTRIBUTED = "misattributed"
     #: The evidence is silent. For a specific claim this is a real finding.
     UNKNOWN = "unknown"
 
@@ -1478,6 +1861,7 @@ class DiffResult:
         return self.verdict in (
             Verdict.CONFLICTED,
             Verdict.UNSOURCED,
+            Verdict.MISATTRIBUTED,
             Verdict.UNKNOWN,
         )
 
@@ -1501,12 +1885,21 @@ class DiffContext:
     vague :attr:`Verdict.UNKNOWN`. It is a session-level fact because one
     response citing nothing says little and a whole session citing nothing says
     almost nothing.
+
+    ``sources`` is the same evidence as ``explicit`` and ``context`` but keeping
+    each result's identity and whether *this* response cited it. The judgement
+    about which source a claim names is per-claim, and it cannot be made from
+    the flattened text. It defaults to empty, which makes
+    :func:`resolve_source` answer :attr:`SourceMatch.UNRESOLVED` and leaves the
+    attribution rules exactly as conservative as they were — a caller that
+    supplies text but no identities gets no new findings.
     """
 
     explicit: tuple[str, ...] = ()
     context: tuple[str, ...] = ()
     implied: Mapping[str, str] = field(default_factory=dict)
     citations_recorded: bool = False
+    sources: tuple[Source, ...] = ()
 
     @property
     def all_text(self) -> str:
@@ -1538,6 +1931,9 @@ def diff_claim(claim: Claim, context: DiffContext) -> DiffResult:
 
     if value.kind is ValueKind.RATIO and value.ratio is not None:
         return _diff_ratio(value, context)
+
+    if value.kind is ValueKind.UNIVERSAL:
+        return _diff_universal(value, context)
 
     explicit_values = _values_of(context.explicit)
     context_values = _values_of(context.context)
@@ -1597,7 +1993,7 @@ def diff_claim(claim: Claim, context: DiffContext) -> DiffResult:
     # That ordering is the whole false-positive argument for this feature: the
     # attribution patterns are allowed to be generous, because a wrong match
     # costs a category label, not a flag an operator has to triage.
-    unsourced = _unsourced(claim, context)
+    unsourced = _attribution_failure(claim, context)
     if unsourced is not None:
         return unsourced
 
@@ -1613,41 +2009,68 @@ def diff_claim(claim: Claim, context: DiffContext) -> DiffResult:
     )
 
 
-def _unsourced(claim: Claim, context: DiffContext) -> DiffResult | None:
-    """The claim names a source it never cited (``S3-T8``).
+def _attribution_failure(claim: Claim, context: DiffContext) -> DiffResult | None:
+    """The claim names a source it did not actually read (``S3-T8``).
 
-    Returns ``None`` unless all of the following hold, because a fabricated
-    citation has to be *provable* from the log:
+    Returns ``None`` unless the log proves a mismatch, because a fabricated
+    citation has to be *provable* rather than suspected:
 
     * the claim names a source at all (no name, no claim of having read it);
     * the session records :attr:`~sentinel.models.events.RefKind.GROUNDS` refs
       somewhere — otherwise "this response cited nothing" is indistinguishable
       from a framework that never emits citations, and the whole rule would be
-      guessing;
-    * this response cited nothing, having had the chance to;
-    * the evidence is silent, so there is no support to defer to.
+      guessing.
+
+    Past that precondition the verdict depends on what the turn actually did,
+    which is the whole reason the rule is per-claim rather than per-session:
+
+    * **cited nothing** → :attr:`Verdict.UNSOURCED`. The named source cannot
+      have been read, because this turn recorded reading nothing.
+    * **cited something else** → resolve the named source against the results
+      that ran. If it resolves to a result this turn did *not* cite, or to
+      nothing at all, that is :attr:`Verdict.MISATTRIBUTED` — a real, finer
+      finding. A turn that cites correctly in one sentence and points at an
+      unconsulted document in another is caught here, which a turn-level rule
+      could never do: one citation anywhere used to silence the rule for every
+      claim in the response.
+
+    An ambiguous or unresolvable name returns ``None``. Generous attribution
+    patterns are tolerable when the worst case is a mislabelled category, but
+    not when the worst case is a flag against a real citation.
     """
-    if not claim.source_attributed:
+    named = claim.source_attributed
+    if not named:
         return None
     if not context.citations_recorded:
         return None
-    if context.explicit:
+
+    if not context.explicit:
+        if not context.has_evidence:
+            detail = f"attributed to {named} but no source was consulted or cited in this turn"
+        else:
+            detail = (
+                f"attributed to {named} but the response cites no tool result, "
+                f"and the available output does not support the claim"
+            )
+        return DiffResult(verdict=Verdict.UNSOURCED, detail=detail, observed=named)
+
+    match, matched = resolve_source(named, context.sources)
+    if match in (SourceMatch.CITED, SourceMatch.AMBIGUOUS, SourceMatch.UNRESOLVED):
         return None
-    if not context.has_evidence:
+
+    cited = sorted({source.label for source in context.sources if source.cited})
+    elsewhere = ", ".join(cited) or "another result"
+    if match is SourceMatch.UNCITED:
         detail = (
-            f"attributed to {claim.source_attributed} but no source was consulted "
-            f"or cited in this turn"
+            f"attributed to {named}, which the turn read from "
+            f"{matched[0].label} but did not cite; the response cites {elsewhere}"
         )
     else:
         detail = (
-            f"attributed to {claim.source_attributed} but the response cites no "
-            f"tool result, and the available output does not support the claim"
+            f"attributed to {named}, but no result in this turn corresponds to "
+            f"it; the response cites {elsewhere}"
         )
-    return DiffResult(
-        verdict=Verdict.UNSOURCED,
-        detail=detail,
-        observed=claim.source_attributed,
-    )
+    return DiffResult(verdict=Verdict.MISATTRIBUTED, detail=detail, observed=named)
 
 
 def _diff_ratio(value: Value, context: DiffContext) -> DiffResult:
@@ -1704,8 +2127,8 @@ def _diff_ratio(value: Value, context: DiffContext) -> DiffResult:
             matched_value=canonical,
             observed=canonical,
         )
-    stated = _raw_numbers(context.all_text)
-    if numerator in stated and denominator in stated:
+    stated = _ratios_stated(context.all_text)
+    if (numerator, denominator) in stated:
         return DiffResult(
             verdict=Verdict.SUPPORTED,
             support_kind=SupportKind.EXPLICIT,
@@ -1714,10 +2137,152 @@ def _diff_ratio(value: Value, context: DiffContext) -> DiffResult:
             matched_value=canonical,
             observed=canonical,
         )
+    # Same total, different passing count. The evidence enumerated a set of this
+    # size and got a different number out of it, so this is a disagreement about
+    # a stated fact rather than silence: a transcript reading "3 of 4 checks
+    # passed" refutes a claim of "4 of 4". Scoped to a *matching denominator*
+    # deliberately — "3 of 4" says nothing about "2 of 5", and treating it as
+    # though it did is how a numeric rule starts inventing contradictions between
+    # unrelated counts.
+    #
+    # ``_ratios_stated`` yields ``(passed, total)`` pairs. Unpacking them the
+    # other way round here silently matched the wrong element and made the whole
+    # branch unreachable, which is why the case that motivated it still reported
+    # "unknown".
+    same_total = sorted(
+        (passed for passed, total in stated if total == denominator),
+        reverse=True,
+    )
+    if same_total:
+        nearest = next((passed for passed in same_total if passed != numerator), None)
+        if nearest is not None:
+            return DiffResult(
+                verdict=Verdict.CONFLICTED,
+                support_kind=SupportKind.CHERRY_PICK,
+                detail=(
+                    f"claims {canonical}, but the source counted "
+                    f"{_render_number(nearest)} of {_render_number(denominator)}"
+                ),
+                cited=bool(context.explicit),
+                matched_value=(f"{_render_number(nearest)} of {_render_number(denominator)}"),
+                observed=str(nearest),
+            )
     return DiffResult(
         verdict=Verdict.UNKNOWN,
         detail=(f"the source does not enumerate a countable set, so {canonical} cannot be checked"),
     )
+
+
+def _item_statuses(text: str) -> dict[str, str]:
+    """Map each enumerated item in *text* to the status it was given.
+
+    ``check_1 pass, check_2 pass, check_3 skipped`` becomes
+    ``{"check_1": "pass", "check_2": "pass", "check_3": "skipped"}``. Keys are
+    lowercased so ``Test_1`` and ``test_1`` are the same item. Both the joined
+    and the adjacent shapes are read; later patterns do not overwrite earlier
+    ones for the same item, so the explicit ``status=`` wins over a bare
+    adjective that happens to sit next to the identifier.
+    """
+    statuses: dict[str, str] = {}
+    for pattern in _ITEM_STATUS_RES:
+        for match in pattern.finditer(text):
+            item = normalize_text(match.group("item")).strip(" -")
+            if item and item not in statuses:
+                statuses[item] = normalize_text(match.group("status"))
+    return statuses
+
+
+def _diff_universal(value: Value, context: DiffContext) -> DiffResult:
+    """Check "all checks passed" against the items the source enumerated.
+
+    A universal claim names no denominator, so the counted-subset rule in
+    :func:`_diff_ratio` cannot touch it — there is no number to compare with the
+    enumeration. What refutes it is the *statuses*: a source that reports
+    ``skipped``, ``failed`` or ``pending`` for any item has already told the
+    reader that not every item passed, and reporting "all passed" over it is the
+    same misrepresentation as reporting a narrowed denominator, stated in the
+    shape that hides it.
+
+    Three outcomes, in decreasing confidence:
+
+    1. **at least one item did not pass** → :attr:`Verdict.CONFLICTED` with
+       :attr:`SupportKind.CHERRY_PICK`, naming the items that were dropped. This
+       is the finding.
+    2. **the enumeration is large enough and every item passed** →
+       :attr:`Verdict.SUPPORTED`. The claim was earned.
+    3. otherwise :attr:`Verdict.UNKNOWN` — the source does not enumerate statuses
+       a reader could count, so the rule declines rather than assuming.
+
+    Read from *cited* evidence when the response cited anything, matching every
+    other rule here: the claim is a statement about the sources the agent says
+    it read.
+    """
+    if not context.has_evidence:
+        return DiffResult(
+            verdict=Verdict.UNKNOWN,
+            detail="no tool output available to ground the claim",
+        )
+    haystack = " \n ".join(context.explicit) if context.explicit else context.all_text
+    statuses = _item_statuses(haystack)
+    if len(statuses) < _MIN_ENUMERATED_SIBLINGS:
+        return DiffResult(
+            verdict=Verdict.UNKNOWN,
+            detail=(
+                f"the source reports no countable {value.canonical} statuses, so "
+                f"'all' cannot be checked"
+            ),
+        )
+
+    dropped = sorted(item for item, status in statuses.items() if status not in _SUCCESS_STATES)
+    if dropped:
+        listed = ", ".join(f"{item} ({statuses[item]})" for item in dropped[:5])
+        more = f" and {len(dropped) - 5} more" if len(dropped) > 5 else ""
+        return DiffResult(
+            verdict=Verdict.CONFLICTED,
+            support_kind=SupportKind.CHERRY_PICK,
+            detail=(
+                f"claims every {value.canonical} passed, but the source reports "
+                f"{len(dropped)} of {len(statuses)} as not passed: {listed}{more}"
+            ),
+            cited=bool(context.explicit),
+            matched_value=", ".join(dropped[:5]),
+            observed=", ".join(f"{item}={statuses[item]}" for item in dropped[:5]),
+        )
+    return DiffResult(
+        verdict=Verdict.SUPPORTED,
+        support_kind=SupportKind.EXPLICIT,
+        detail=f"source reports all {len(statuses)} {value.canonical} items as passed",
+        cited=bool(context.explicit),
+        matched_value=f"{len(statuses)} passed",
+        observed=f"{len(statuses)} passed",
+    )
+
+
+#: ``N of M`` as it appears in *evidence*. Deliberately looser than
+#: :data:`_RATIO_RE`, which governs *claims* and requires a trailing noun so that a
+#: bare "2 of 3" is not read as a countable set. Evidence is the other direction:
+#: a tool printing "Seats used: 12 of 20." has stated a count whatever noun
+#: follows it, and requiring one made the claim "12 of 20 seats" look ungrounded
+#: against the exact line that states it.
+_STATED_RATIO_RE = re.compile(r"\b(?P<num>\d+)\s*(?:of|out of|/)\s*(?P<den>\d+)\b")
+
+
+def _ratios_stated(text: str) -> set[tuple[Decimal, Decimal]]:
+    """Every ``N of M`` count the evidence states, as ``(numerator, denominator)``.
+
+    Matched as a *ratio phrase*, not as a pair of numbers that both occur
+    somewhere in the text. Set membership is far too weak: an output reading
+    "3 of 4 checks passed" plus "12 tickets, 4 due today" contains both 3 and 4,
+    which made a claim of "4 of 4" look verbatim and supported. The number was
+    really there; the *count* was not.
+    """
+    ratios: set[tuple[Decimal, Decimal]] = set()
+    for match in _STATED_RATIO_RE.finditer(text):
+        numerator = _to_decimal(match.group("num"))
+        denominator = _to_decimal(match.group("den"))
+        if numerator is not None and denominator is not None and denominator != 0:
+            ratios.add((numerator, denominator))
+    return ratios
 
 
 def _values_of(texts: Iterable[str]) -> list[Value]:
@@ -2363,6 +2928,11 @@ def severity_for(claim: Claim, diff: DiffResult) -> Severity:
         # a misrepresentation, not a rounding error, whatever the claim's kind.
         return Severity.HIGH
     severity = _kind_severity(claim, contradicted)
+    if diff.verdict is Verdict.MISATTRIBUTED:
+        # The citation is resolved and wrong, which is a defect in the answer
+        # regardless of what kind of value was misattributed. `medium` is the
+        # floor, so a legal- or safety-floored claim still escalates above it.
+        severity = _max_severity(severity, Severity.MEDIUM)
     return _max_severity(severity, _safety_floor(claim))
 
 
@@ -2421,6 +2991,10 @@ def confidence_for(claim: Claim, diff: DiffResult, context: DiffContext) -> floa
         Verdict.IMPLIED: 0.8,
         Verdict.CONFLICTED: 0.9,
         Verdict.UNSOURCED: 0.75,
+        # Higher than UNSOURCED: the named source was resolved against the log
+        # and did not match what the turn cited, which is a narrower thing to
+        # be wrong about than "nothing was cited at all".
+        Verdict.MISATTRIBUTED: 0.85,
         Verdict.UNKNOWN: 0.6,
     }[diff.verdict]
     if diff.support_kind is SupportKind.ROUNDING:
@@ -2448,6 +3022,8 @@ __all__ = [
     "DiffResult",
     "GroundingLexicon",
     "RuleBasedClaimExtractor",
+    "Source",
+    "SourceMatch",
     "SupportKind",
     "Value",
     "ValueKind",
@@ -2458,6 +3034,7 @@ __all__ = [
     "is_actionable",
     "is_assertion",
     "normalize_text",
+    "resolve_source",
     "severity_for",
     "split_sentences",
 ]

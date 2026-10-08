@@ -22,14 +22,18 @@ from sentinel.eval.provenance_core import (
     DiffContext,
     GroundingLexicon,
     RuleBasedClaimExtractor,
+    Source,
+    SourceMatch,
     SupportKind,
     Value,
     ValueKind,
     Verdict,
+    _item_statuses,
     diff_claim,
     extract_values,
     is_actionable,
     normalize_text,
+    resolve_source,
     severity_for,
     split_sentences,
 )
@@ -405,3 +409,183 @@ class TestSeverity:
         claim = _only(extractor, "Churn is 4.2%.")
         grounded = diff_claim(claim, DiffContext(explicit=("Monthly churn is 4.2%.",)))
         assert is_actionable(claim, grounded) is False
+
+
+class TestSourceResolution:
+    """Which result a named source points at (``resolve_source``).
+
+    Every test here is a false-positive question rather than a detection one.
+    The only outcomes that may become a flag are ``ABSENT`` and ``UNCITED``;
+    ``AMBIGUOUS`` and ``UNRESOLVED`` exist precisely so the rule declines to
+    guess, and a regression that turns either into a flag would be the most
+    damaging change this module could take.
+    """
+
+    @staticmethod
+    def _sources(*rows: tuple[str, str, bool]) -> tuple[Source, ...]:
+        return tuple(
+            Source(event_id=f"e{i}", tool=tool, text=text, cited=cited)
+            for i, (tool, text, cited) in enumerate(rows)
+        )
+
+    def test_the_named_source_resolves_to_the_result_it_was_cited_from(self) -> None:
+        match, found = resolve_source(
+            "the compliance report",
+            self._sources(("compliance.report", "0 incidents.", True)),
+        )
+        assert match is SourceMatch.CITED
+        assert len(found) == 1
+
+    def test_a_source_that_ran_but_was_not_cited_is_uncited(self) -> None:
+        match, found = resolve_source(
+            "the compliance report",
+            self._sources(
+                ("weather.forecast", "light rain.", True),
+                ("compliance.report", "0 incidents.", False),
+            ),
+        )
+        assert match is SourceMatch.UNCITED
+        assert found[0].tool == "compliance.report"
+
+    def test_a_source_that_never_ran_is_absent(self) -> None:
+        match, found = resolve_source(
+            "the vendor security assessment", self._sources(("billing.lookup", "$49.", True))
+        )
+        assert match is SourceMatch.ABSENT
+        assert found == ()
+
+    def test_two_matches_do_not_identify_a_source(self) -> None:
+        match, _ = resolve_source(
+            "the revenue table",
+            self._sources(
+                ("revenue.q3", "closed late.", True),
+                ("revenue.q2", "closed on time.", False),
+            ),
+        )
+        assert match is SourceMatch.AMBIGUOUS
+
+    @pytest.mark.parametrize(
+        "generic",
+        ["the report", "the document", "the api", "the file", "the data"],
+    )
+    def test_a_generic_name_cannot_identify_anything(self, generic: str) -> None:
+        match, _ = resolve_source(generic, self._sources(("compliance.report", "0.", True)))
+        assert match is SourceMatch.UNRESOLVED
+
+    def test_no_sources_resolves_to_nothing(self) -> None:
+        assert resolve_source("the compliance report", ())[0] is SourceMatch.UNRESOLVED
+
+    def test_a_camel_case_tool_name_is_tokenised(self) -> None:
+        match, _ = resolve_source(
+            "the compliance report", self._sources(("fetchComplianceReport", "0.", True))
+        )
+        assert match is SourceMatch.CITED
+
+    def test_the_output_text_can_name_the_source(self) -> None:
+        """Not every instrumentor puts a meaningful name on the tool."""
+        match, _ = resolve_source(
+            "Acme", self._sources(("company.lookup", '{"name": "Acme Corp"}', True))
+        )
+        assert match is SourceMatch.CITED
+
+    def test_plurals_match_without_rewriting_the_word(self) -> None:
+        """A word is matched with its 's', never folded — folding mangles
+        'acmes' into 'acme' and then silently fails to match."""
+        match, _ = resolve_source(
+            "the audit findings", self._sources(("audit.findings", "x.", True))
+        )
+        assert match is SourceMatch.CITED
+
+    def test_every_distinctive_word_must_match(self) -> None:
+        """Partial matches are not matches: naming 'q3 compliance' does not
+        identify the result that is merely about compliance."""
+        match, _ = resolve_source(
+            "the q3 compliance report", self._sources(("compliance.register", "0.", True))
+        )
+        assert match is SourceMatch.ABSENT
+
+
+class TestUniversalClaims:
+    """``all checks passed`` against an enumeration with per-item statuses.
+
+    The counted-denominator rule cannot reach these: a universal claim states no
+    denominator, so there is no number to compare with the source. What refutes
+    it is the statuses.
+    """
+
+    @staticmethod
+    def _universal(extractor: RuleBasedClaimExtractor, text: str):  # type: ignore[no-untyped-def]
+        claim = _only(extractor, text)
+        assert claim.kind is ClaimKind.UNIVERSAL, claim.kind
+        return claim
+
+    def test_a_universal_claim_is_extracted(self, extractor: RuleBasedClaimExtractor) -> None:
+        claim = self._universal(extractor, "All checks passed.")
+        assert claim.value is not None
+        assert claim.value.canonical == "check"
+
+    @pytest.mark.parametrize(
+        "text",
+        ["Every test succeeded.", "Each job is green.", "All 4 smoke tests passed."],
+    )
+    def test_the_phrasings_are_recognised(
+        self, extractor: RuleBasedClaimExtractor, text: str
+    ) -> None:
+        assert self._universal(extractor, text).value is not None
+
+    def test_a_bare_noun_without_a_quantifier_is_not_universal(
+        self, extractor: RuleBasedClaimExtractor
+    ) -> None:
+        """ "checks passed" says how many passed without saying how many there
+        were — a different claim, and one the rule must not answer for."""
+        claims = extractor.extract_sync("Checks passed this morning.")
+        assert all(claim.kind is not ClaimKind.UNIVERSAL for claim in claims)
+
+    def test_a_skipped_item_refutes_the_claim(self, extractor: RuleBasedClaimExtractor) -> None:
+        claim = self._universal(extractor, "All checks passed.")
+        result = diff_claim(
+            claim,
+            DiffContext(explicit=("check_1 pass, check_2 pass, check_3 skipped, check_4 pass.",)),
+        )
+        assert result.verdict is Verdict.CONFLICTED
+        assert result.support_kind is SupportKind.CHERRY_PICK
+        # The finding has to name what was dropped, or a reviewer cannot act.
+        assert "check_3" in result.detail
+
+    def test_every_item_passing_supports_the_claim(
+        self, extractor: RuleBasedClaimExtractor
+    ) -> None:
+        claim = self._universal(extractor, "All checks passed.")
+        result = diff_claim(
+            claim,
+            DiffContext(explicit=("check_1 pass, check_2 pass, check_3 pass, check_4 pass.",)),
+        )
+        assert result.verdict is Verdict.SUPPORTED
+        assert is_actionable(claim, result) is False
+
+    def test_too_few_items_to_check_is_not_a_conflict(
+        self, extractor: RuleBasedClaimExtractor
+    ) -> None:
+        """Below the enumeration floor the rule cannot tell a complete set from
+        a partial one, so it says UNKNOWN rather than asserting a conflict."""
+        claim = self._universal(extractor, "All smoke tests passed.")
+        result = diff_claim(claim, DiffContext(explicit=("smoke_1 pass, smoke_2 skipped.",)))
+        assert result.verdict is Verdict.UNKNOWN
+        assert result.support_kind is not SupportKind.CHERRY_PICK
+
+    def test_status_words_in_prose_are_not_item_statuses(self) -> None:
+        """ "no", "done" and "missing" are ordinary English. Without an
+        identifier or a separator they must not build an enumeration."""
+        statuses = _item_statuses("There is no further work. It is done and nothing is missing.")
+        assert statuses == {}
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("check_1 pass, check_2 fail, check_3 skipped", {"check_1", "check_2", "check_3"}),
+            ("job_1: succeeded, job_2: failed", {"job_1", "job_2"}),
+            ("Test_1=PASS, test_1=pass", {"test_1"}),
+        ],
+    )
+    def test_both_status_shapes_are_read(self, text: str, expected: set[str]) -> None:
+        assert set(_item_statuses(text)) == expected

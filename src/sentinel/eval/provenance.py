@@ -40,6 +40,7 @@ from sentinel.eval.provenance_core import (
     DiffResult,
     GroundingLexicon,
     RuleBasedClaimExtractor,
+    Source,
     Verdict,
     confidence_for,
     diff_claim,
@@ -83,7 +84,10 @@ MODULE = "sentinel.tool_grounding"
 #: cherry-picked-count detection, both of which produce findings 0.1.0 could not.
 #: The bump is what makes the idempotency key change, so sessions evaluated
 #: under 0.1.0 are re-evaluated rather than silently keeping stale verdicts.
-MODULE_VERSION = "0.2.0"
+#: 0.3.0 adds per-claim source resolution (``misattributed_citation``): a claim
+#: that names one source while the turn cites another is now its own finding,
+#: rather than being swallowed by "the turn cited something".
+MODULE_VERSION = "0.3.0"
 
 #: Flag categories, per the universal flag schema.
 CATEGORY_UNGROUNDED = "ungrounded_claim"
@@ -93,10 +97,20 @@ CATEGORY_CONTRADICTED = "contradicted_claim"
 #: :data:`CATEGORY_UNGROUNDED` because the remedy is different: not "this
 #: number has no support" but "this document was never opened".
 CATEGORY_UNSOURCED = "unsourced_citation"
+#: The claim named source A and the turn cited source B. Finer than
+#: :data:`CATEGORY_UNSOURCED`, which is the case where nothing was cited at
+#: all. The remedy here is "cite what you read", and the flag names both sides
+#: so a reviewer does not have to go and diff the turn by hand.
+CATEGORY_MISATTRIBUTED = "misattributed_citation"
 
 #: Publish the taxonomy this module ships, so `known_categories()` and any tool
 #: that enumerates it agree with the code rather than with a doc.
-register_category(CATEGORY_UNGROUNDED, CATEGORY_CONTRADICTED, CATEGORY_UNSOURCED)
+register_category(
+    CATEGORY_UNGROUNDED,
+    CATEGORY_CONTRADICTED,
+    CATEGORY_UNSOURCED,
+    CATEGORY_MISATTRIBUTED,
+)
 
 #: Max tool results treated as evidence for one response. Bounded so a session
 #: with thousands of calls cannot make a single diff pathological.
@@ -242,6 +256,8 @@ def category_for(diff: DiffResult) -> str:
         return CATEGORY_CONTRADICTED
     if diff.verdict is Verdict.UNSOURCED:
         return CATEGORY_UNSOURCED
+    if diff.verdict is Verdict.MISATTRIBUTED:
+        return CATEGORY_MISATTRIBUTED
     return CATEGORY_UNGROUNDED
 
 
@@ -393,6 +409,7 @@ def gather_evidence(
     """
     explicit: list[str] = []
     explicit_refs: list[EvidenceRef] = []
+    sources: list[Source] = []
     for ref in response.refs:
         if ref.kind is not RefKind.GROUNDS:
             continue
@@ -401,6 +418,14 @@ def gather_evidence(
             continue
         text = _result_text(target)
         explicit.append(text)
+        sources.append(
+            Source(
+                event_id=target.event_id,
+                tool=_result_tool(graph, target),
+                text=text,
+                cited=True,
+            )
+        )
         explicit_refs.append(
             EvidenceRef(
                 event_id=target.event_id,
@@ -419,6 +444,14 @@ def gather_evidence(
         seen.add(result.event_id)
         text = _result_text(result)
         context.append(text)
+        sources.append(
+            Source(
+                event_id=result.event_id,
+                tool=_result_tool(graph, result),
+                text=text,
+                cited=False,
+            )
+        )
         context_refs.append(
             EvidenceRef(
                 event_id=result.event_id,
@@ -430,6 +463,11 @@ def gather_evidence(
     if len(context) > MAX_EVIDENCE_RESULTS:
         context = context[-MAX_EVIDENCE_RESULTS:]
         context_refs = context_refs[-MAX_EVIDENCE_RESULTS:]
+        # The source identities are trimmed with the text they describe, or the
+        # resolution rule would match a named source against evidence the diff
+        # was already refused to look at.
+        kept = {ref.event_id for ref in context_refs}
+        sources = [source for source in sources if source.cited or source.event_id in kept]
 
     return (
         DiffContext(
@@ -437,6 +475,7 @@ def gather_evidence(
             context=tuple(context),
             implied=_implied_offerings(response, explicit + context),
             citations_recorded=citations_recorded,
+            sources=tuple(sources),
         ),
         tuple(explicit_refs + context_refs),
     )
@@ -592,6 +631,26 @@ def _result_text(result: Event) -> str:
     if output is None:
         output = result.payload.get("result")
     return _render(output)
+
+
+def _result_tool(graph: CallGraph, result: Event) -> str:
+    """The tool a result came from, for naming it in a finding.
+
+    Prefers the result's own payload because that is the identity the agent (and
+    the reader of the flag) has. Falls back to the ``tool.call`` it was caused
+    by, since not every instrumentor copies the name onto the result.
+    """
+    name = result.payload.get("tool")
+    if isinstance(name, str) and name:
+        return name
+    for ref in result.refs:
+        call = graph.nodes.get(ref.event_id)
+        if call is None or call.type != TOOL_CALL:
+            continue
+        called = call.payload.get("tool")
+        if isinstance(called, str) and called:
+            return called
+    return ""
 
 
 def _render(value: object) -> str:

@@ -482,7 +482,7 @@ class TestEvidenceGathering:
     async def test_an_uncited_result_is_still_context(self) -> None:
         """Available-but-unused evidence must not become a false positive."""
         case = case_by_id("grounded_explicit_price")
-        events = case.events()
+        events = case.uncited_events()
         graph = build_call_graph(events[0].session_id, events)
         response = next(event for event in events if event.type == LLM_RESPONSE)
 
@@ -813,3 +813,90 @@ class TestPluggableExtraction:
         store, _ = await _store("grounded_explicit_price")
         evaluator = ProvenanceEvaluator(store)
         assert isinstance(evaluator._extractor, RuleBasedClaimExtractor)
+
+
+class TestReasoningCaptureIsWiredEndToEnd:
+    """The ``S3-T5`` capture gap, closed: a real transport, a real store, a real
+    evaluation.
+
+    The trace-reading seam is covered above with hand-built payloads, and each
+    instrumentor has its own test proving it writes the key. Neither is the claim
+    that matters, which is that the two halves agree: the key the transport
+    writes is the key the evaluator reads. This test captures a response through
+    the real OpenAI-compatible transport, takes the payload it produced, and
+    evaluates a session that uses it — so a rename on either side fails here
+    rather than silently disabling reasoning capture in production.
+    """
+
+    URL = "https://api.openai.com/v1/chat/completions"
+
+    async def _capture_payload(self) -> Mapping[str, object]:
+        """A real ``llm.response`` payload, captured through the transport."""
+        import httpx
+        import respx
+
+        from sentinel import session
+        from sentinel.instrument.openai_compat import chat_completion
+
+        reply = {
+            "id": "chatcmpl-trace",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "The pro plan costs $49 per month.",
+                        # A figure the model considered and dropped on the way to
+                        # the answer it gave.
+                        "reasoning_content": "The upgrade costs $79 per month, I think.",
+                    }
+                }
+            ],
+        }
+        store = SQLiteEventStore(":memory:")
+        try:
+            with respx.mock:
+                respx.post(self.URL).mock(return_value=httpx.Response(200, json=reply))
+                async with session(store) as ctx, httpx.AsyncClient() as client:
+                    await chat_completion(
+                        client, ctx, url=self.URL, request={"model": "gpt-4o", "messages": []}
+                    )
+            response = next(
+                event
+                for event in await store.get_session(ctx.session_id)
+                if event.type == LLM_RESPONSE
+            )
+            return response.payload
+        finally:
+            await store.close()
+
+    async def test_a_trace_the_transport_wrote_is_the_one_the_evaluator_reads(self) -> None:
+        captured = await self._capture_payload()
+        assert captured["reasoning"] == ["The upgrade costs $79 per month, I think."]
+
+        # The corpus case supplies the turn's shape — a tool call, its result,
+        # and a response citing it. The answer text is the corpus's; the
+        # ``reasoning`` key is the transport's, verbatim.
+        case = case_by_id("grounded_explicit_price")
+        store = SQLiteEventStore(":memory:")
+        try:
+            for event in case.events():
+                if event.type == LLM_RESPONSE:
+                    event = event.model_copy(
+                        update={"payload": {**event.payload, "reasoning": captured["reasoning"]}}
+                    )
+                await store.append(event)
+            result = await ProvenanceEvaluator(store).analyze_session(case.events()[0].session_id)
+        finally:
+            await store.close()
+
+        # The answer's own figure is grounded against the cited tool result.
+        assert any(
+            analysis.diff.verdict in (Verdict.SUPPORTED, Verdict.IMPLIED)
+            for analysis in result.analyses
+        ), [a.claim.text for a in result.analyses]
+        # The figure that only ever appeared in the trace is flagged: it is a
+        # claim the model made, and $49-per-month evidence does not support it.
+        trace_claims = [a for a in result.analyses if "79" in a.claim.text]
+        assert trace_claims, [a.claim.text for a in result.analyses]
+        assert trace_claims[0].diff.verdict is Verdict.UNKNOWN
+        assert trace_claims[0].is_finding is True
