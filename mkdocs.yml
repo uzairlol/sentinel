@@ -12,6 +12,12 @@ theme:
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
       primary: indigo
+markdown_extensions:
+  # Required for the `--8<--` includes that embed repo-root example scripts.
+  # base_path is repo root (not docs_dir) so the snippets can reach files
+  # outside docs/; without it those includes render as literal text.
+  - pymdownx.snippets:
+      base_path: ["."]
 plugins:
   - search
   - mkdocstrings:
@@ -23,5 +29,6 @@ plugins:
 nav:
   - Home: index.md
   - ADRs: adr/README.md
+  - Examples: examples/memory-integrity.md
 watch:
   - src/sentinel

@@ -103,6 +103,14 @@ include = [
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+# Pages that embed a repo-root script via pymdownx.snippets. ruff-format parses
+# Python fences inside Markdown, and `--8<--` is not valid Python, so it
+# rewrites the include directive into `--8 < --` and the embed silently stops
+# rendering. Formatting prose here has no value either way.
+extend-exclude = ["docs/examples"]
+# pre-commit invokes ruff with filenames, which would otherwise bypass
+# extend-exclude and reformat the very file it excludes.
+force-exclude = true
 
 [tool.ruff.lint]
 select = [

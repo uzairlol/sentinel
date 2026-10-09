@@ -246,4 +246,4 @@ MemoryIntegrityEvaluator(
 A worked end-to-end example — a session whose memory is corrupted and whose
 summary invents an event, producing both a `memory_drift` and a
 `memory_ungrounded` flag — is in
-[`examples/memory_integrity.py`](../../examples/memory_integrity.py).
+[the memory-integrity example](../examples/memory-integrity.md).
